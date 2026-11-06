@@ -19,7 +19,10 @@ class Config:
     # Optional: create this agent on startup if it doesn't exist yet.
     AGENT_USERNAME = os.getenv("AGENT_USERNAME")
     AGENT_PASSWORD = os.getenv("AGENT_PASSWORD")
-    SQLALCHEMY_DATABASE_URI = os.getenv("DATABASE_URL", "sqlite:///service.db")
+    # Some hosts give postgres:// URLs, which SQLAlchemy rejects; fix the prefix.
+    SQLALCHEMY_DATABASE_URI = os.getenv("DATABASE_URL", "sqlite:///service.db").replace(
+        "postgres://", "postgresql://", 1
+    )
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
     # "claude" or "gemini". Each SDK reads its own key from the environment.
