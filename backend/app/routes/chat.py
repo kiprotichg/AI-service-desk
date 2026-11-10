@@ -1,7 +1,9 @@
+import json
+import logging
 import secrets
 from datetime import timedelta
 
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, current_app, jsonify, request, stream_with_context
 
 from ..auth import (agent_required, current_agent, current_user, has_conversation_access,
                     issue_conversation_token, unauthorized)
@@ -89,19 +91,33 @@ def _open_chat(conv_id):
     return conv, None
 
 
+log = logging.getLogger(__name__)
+
+
+def _ai_input(user_msg, prior):
+    """(history, files of this message) to send to the AI, within the size budget."""
+    budget = attachments.AI_ATTACHMENT_BUDGET
+    current_parts, budget = attachments.load_parts(user_msg.attachments, budget)
+    history = attachments.build_history(
+        prior[-current_app.config["MAX_HISTORY_MESSAGES"]:], budget)
+    return history, current_parts
+
+
 def _answer(conv, user_msg, prior, mode, web_search=False):
     """Ask the AI to reply to user_msg (given the earlier messages) and store the reply.
 
     Shared by sending, regenerating and editing. Opens or updates the chat's ticket.
     Returns (ai_reply, assistant_message, ticket_or_None).
     """
-    budget = attachments.AI_ATTACHMENT_BUDGET
-    current_parts, budget = attachments.load_parts(user_msg.attachments, budget)
-    history = attachments.build_history(
-        prior[-current_app.config["MAX_HISTORY_MESSAGES"]:], budget)
+    history, current_parts = _ai_input(user_msg, prior)
     ai = ai_service.generate_reply(history, user_msg.content, current_parts, mode=mode,
                                    web_search=web_search)
+    bot_msg, ticket = _store_answer(conv, user_msg, ai, mode)
+    return ai, bot_msg, ticket
 
+
+def _store_answer(conv, user_msg, ai, mode):
+    """Save the assistant's reply; open or update the chat's ticket. Returns (message, ticket)."""
     user_msg.intent, user_msg.sentiment = ai.intent, ai.sentiment
     bot_msg = Message(conversation=conv, role="assistant", content=ai.reply,
                       suggestions=ai.suggestions, sources=ai.sources)
@@ -125,7 +141,51 @@ def _answer(conv, user_msg, prior, mode, web_search=False):
         conv.status = "escalated"
     if ticket is not None and mode == "service" and (ticket.module or "service") == "service":
         _apply_service_details(ticket, ai, bot_msg)
-    return ai, bot_msg, ticket
+    return bot_msg, ticket
+
+
+def _ndjson(obj):
+    return json.dumps(obj) + "\n"
+
+
+def _stream_answer(conv, user_msg, prior, mode, web_search):
+    """Send the answer as it's written: one JSON object per line.
+
+    {"type": "start", "user_message"}, then {"type": "delta", "text"} pieces
+    ({"type": "reset"} means drop what was shown so far), then {"type": "done", ...}
+    with the same body as the normal response, or {"type": "error", "error"}.
+    """
+    history, parts = _ai_input(user_msg, prior)
+    question = user_msg.to_dict()
+    conv_id, msg_id = conv.id, user_msg.id
+
+    def events():
+        yield _ndjson({"type": "start", "user_message": question})
+        try:
+            ai = None
+            for kind, value in ai_service.stream_reply(history, question["content"], parts,
+                                                       mode=mode, web_search=web_search):
+                if kind == "delta":
+                    yield _ndjson({"type": "delta", "text": value})
+                elif kind == "reset":
+                    yield _ndjson({"type": "reset"})
+                else:
+                    ai = value
+            chat = db.session.get(Conversation, conv_id)
+            asked = db.session.get(Message, msg_id)
+            bot_msg, ticket = _store_answer(chat, asked, ai, mode)
+            db.session.commit()
+            yield _ndjson({"type": "done", **_reply_body(chat, ai, bot_msg, ticket,
+                                                         user_message=asked.to_dict())})
+        except Exception:
+            log.exception("streaming answer failed")
+            db.session.rollback()
+            yield _ndjson({"type": "error",
+                           "error": "Something went wrong while answering. Please try again."})
+
+    return current_app.response_class(
+        stream_with_context(events()), mimetype="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 def _reply_body(conv, ai, bot_msg, ticket, **extra):
@@ -165,6 +225,9 @@ def send_message(conv_id):
     db.session.add(user_msg)
     if not conv.title:
         conv.title = (content or new_files[0].filename)[:60]
+    if request.args.get("stream") == "1":
+        db.session.commit()   # the question is kept even if answering fails
+        return _stream_answer(conv, user_msg, prior, mode, _flag(fields.get("web_search")))
     ai, bot_msg, ticket = _answer(conv, user_msg, prior, mode, _flag(fields.get("web_search")))
     db.session.commit()
     return jsonify(_reply_body(conv, ai, bot_msg, ticket,

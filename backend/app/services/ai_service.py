@@ -225,6 +225,11 @@ def generate_reply(history, user_message, attachments=(), mode="service", web_se
         reply = _offline_reply(user_message, faqs, has_files=bool(attachments), mode=mode)
         if web_search:
             reply.notice = WEB_SEARCH_UNAVAILABLE
+    return _finish(reply, user_message, mode)
+
+
+def _finish(reply, user_message, mode):
+    """Rules every reply gets, whichever model (or the offline responder) wrote it."""
     if mode == "general":
         # General mode never opens tickets, whatever the model returned.
         reply.escalate = False
@@ -266,6 +271,195 @@ def clean_suggestions(items, user_message=""):
 
 def _norm(text):
     return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+STREAM_FORMAT = """
+
+Reply format: write your answer for the user first, as plain text. After it, on a new
+line, write <meta>, then one line of JSON with the keys "intent", "sentiment",
+"escalate", "ticket_subject", "serial_number", "customer_site" and "suggestions"
+(following the rules above), then </meta>. Nothing comes after </meta>, and the answer
+never mentions this block. Example ending:
+<meta>{"intent": "general", "sentiment": "neutral", "escalate": false, "ticket_subject": "", "serial_number": "", "customer_site": "", "suggestions": ["...", "...", "..."]}</meta>"""
+
+
+def stream_reply(history, user_message, attachments=(), mode="service", web_search=False):
+    """Like generate_reply, but yields the answer while it's being written.
+
+    Yields ("delta", text) pieces, possibly ("reset", None) if a half-written answer
+    had to be thrown away, and finally ("done", AIReply). Gemini streams for real;
+    Claude and the offline responder deliver the whole answer as one piece.
+    """
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of {MODES}")
+    cfg = current_app.config
+    if not (cfg["AI_ENABLED"] and cfg["AI_PROVIDER"] == "gemini"):
+        reply = generate_reply(history, user_message, attachments, mode, web_search)
+        yield ("delta", reply.reply)
+        yield ("done", reply)
+        return
+
+    global _search_off_until
+    attachments = list(attachments)
+    faqs = (knowledge_base.search(user_message, module=mode)
+            if user_message and mode != "general" else [])
+    history = history[-cfg["MAX_HISTORY_MESSAGES"]:]
+    try_search = web_search and time.monotonic() >= _search_off_until
+    for search in ([True, False] if try_search else [False]):
+        started = False
+        try:
+            turn = _user_turn(user_message, faqs, attachments, mode, search)
+            for kind, value in _gemini_stream(history, turn, attachments,
+                                              PROMPTS[mode] + STREAM_FORMAT, search,
+                                              mode, user_message):
+                if kind == "delta":
+                    started = True
+                    yield ("delta", value)
+                else:
+                    reply = value
+            if web_search and not search:
+                reply.notice = WEB_SEARCH_UNAVAILABLE
+            yield ("done", _finish(reply, user_message, mode))
+            return
+        except Exception as exc:
+            if search and _is_quota_error(exc):
+                _search_off_until = time.monotonic() + SEARCH_COOLDOWN_SECONDS
+            log.exception("gemini stream failed (web search %s)", "on" if search else "off")
+            if started:
+                yield ("reset", None)
+    reply = _offline_reply(user_message, faqs, has_files=bool(attachments), mode=mode)
+    if web_search:
+        reply.notice = WEB_SEARCH_UNAVAILABLE
+    reply = _finish(reply, user_message, mode)
+    yield ("delta", reply.reply)
+    yield ("done", reply)
+
+
+class _MetaSplitter:
+    """Splits streamed text into the visible answer and the trailing <meta> block.
+
+    Holds back a few characters that might be the start of "<meta>", so the tag never
+    flashes on screen when it arrives split across chunks.
+    """
+    TAG = "<meta>"
+
+    def __init__(self):
+        self.pending, self.visible, self.meta_raw, self.in_meta = "", "", "", False
+
+    def feed(self, text):
+        if self.in_meta:
+            self.meta_raw += text
+            return ""
+        self.pending += text
+        at = self.pending.find(self.TAG)
+        if at != -1:
+            out, self.meta_raw = self.pending[:at], self.pending[at + len(self.TAG):]
+            self.pending, self.in_meta = "", True
+        else:
+            keep = next((k for k in range(min(len(self.TAG) - 1, len(self.pending)), 0, -1)
+                         if self.TAG.startswith(self.pending[-k:])), 0)
+            cut = len(self.pending) - keep
+            out, self.pending = self.pending[:cut], self.pending[cut:]
+        self.visible += out
+        return out
+
+    def close(self):
+        out = "" if self.in_meta else self.pending
+        self.pending = ""
+        self.visible += out
+        return out
+
+    def meta(self):
+        raw = self.meta_raw.split("</meta>")[0]
+        start, end = raw.find("{"), raw.rfind("}")
+        if start == -1 or end < start:
+            return None
+        try:
+            data = json.loads(raw[start:end + 1])
+        except ValueError:
+            return None
+        return data if isinstance(data, dict) else None
+
+
+def _reply_from_stream(text, meta, mode, user_message, source):
+    """An AIReply from streamed text and its <meta> block (guessing if the block is missing)."""
+    text = text.strip()
+    if not text:
+        raise ValueError("model returned an empty reply")
+    if meta is None:
+        log.warning("%s reply had no usable <meta> block; using keyword fallbacks", source)
+        topic = _detect_intent(user_message, mode) if mode in _INTENT_PATTERNS else "question"
+        wants_human = mode != "general" and bool(_HUMAN.search(user_message or ""))
+        meta = {"intent": topic, "escalate": wants_human,
+                "ticket_subject": (user_message or "")[:80] if wants_human else "",
+                "sentiment": ("negative" if _NEGATIVE.search(user_message or "")
+                              else "positive" if _POSITIVE.search(user_message or "") else "neutral")}
+    return _parse_reply(json.dumps({**meta, "reply": text}), source)
+
+
+def _is_overloaded(exc):
+    """Errors where another model is worth trying: busy, rate limited, unavailable."""
+    text = str(exc).lower()
+    return any(s in text for s in ("503", "unavailable", "high demand", "overloaded",
+                                   "429", "resource_exhausted", "500", "internal", "404",
+                                   "not found"))
+
+
+def _gemini_models():
+    cfg = current_app.config
+    models = [cfg["GEMINI_MODEL"]]
+    fallback = cfg.get("GEMINI_FALLBACK_MODEL")
+    if fallback and fallback not in models:
+        models.append(fallback)
+    return models
+
+
+def _gemini_config(system, web_search, json_output=False):
+    from google.genai import types
+    extra = {}
+    level = current_app.config.get("GEMINI_THINKING")
+    if level:
+        extra["thinking_config"] = types.ThinkingConfig(thinking_level=level)
+    if json_output:
+        extra.update(response_mime_type="application/json", response_json_schema=REPLY_SCHEMA)
+    return types.GenerateContentConfig(
+        system_instruction=system, max_output_tokens=MAX_OUTPUT_TOKENS,
+        tools=[types.Tool(google_search=types.GoogleSearch())] if web_search else None, **extra)
+
+
+def _gemini_stream(history, user_turn, attachments, system, web_search, mode, user_message):
+    """Yield ("delta", text)... then ("reply", AIReply). Tries the fallback model if the
+    main one is overloaded before it has written anything."""
+    contents = _gemini_contents(history, user_turn, attachments)
+    config = _gemini_config(system, web_search)
+    models = _gemini_models()
+    for i, model in enumerate(models):
+        splitter, sources, started = _MetaSplitter(), [], False
+        try:
+            for chunk in _get_gemini_client().models.generate_content_stream(
+                    model=model, contents=contents, config=config):
+                piece = splitter.feed(chunk.text or "")
+                if piece:
+                    started = True
+                    yield ("delta", piece)
+                if web_search:
+                    sources = _gemini_sources(chunk) or sources
+        except Exception as exc:
+            if (started or i == len(models) - 1 or not _is_overloaded(exc)
+                    or (web_search and _is_quota_error(exc))):   # search quota covers every model
+                raise
+            log.warning("%s unavailable (%s); trying %s", model, str(exc)[:80], models[i + 1])
+            continue
+        tail = splitter.close()
+        if tail:
+            yield ("delta", tail)
+        if not splitter.visible.strip():
+            yield ("reply", _declined("gemini"))   # blocked, or stopped without output
+            return
+        reply = _reply_from_stream(splitter.visible, splitter.meta(), mode, user_message, "gemini")
+        reply.sources = sources
+        yield ("reply", reply)
+        return
 
 
 # Explicit forms only ("serial no: AB-1234", "S/N 99812", "site: Nairobi branch");
@@ -444,9 +638,9 @@ def _get_gemini_client():
         from google import genai
         from google.genai import types
         # Gemini often answers 503 "high demand" for a moment; retry those (and rate
-        # limits / other temporary server errors) with backoff before falling back to
-        # the offline answer. Worst case adds roughly 1 + 2 + 4 seconds.
-        retry = types.HttpRetryOptions(attempts=4, initial_delay=1.0, max_delay=8.0,
+        # limits / other temporary server errors) briefly, then the fallback model
+        # (GEMINI_FALLBACK_MODEL) takes over. Worst case adds about 0.5 + 1 seconds.
+        retry = types.HttpRetryOptions(attempts=3, initial_delay=0.5, max_delay=2.0,
                                        exp_base=2.0, http_status_codes=[429, 500, 502, 503, 504])
         _gemini_client = genai.Client(  # reads GEMINI_API_KEY (or GOOGLE_API_KEY)
             http_options=types.HttpOptions(retry_options=retry))
@@ -466,9 +660,8 @@ def _gemini_parts(text, parts):
     return out
 
 
-def _gemini_reply(history, user_turn, attachments=(), system=SERVICE_PROMPT, web_search=False):
+def _gemini_contents(history, user_turn, attachments=()):
     from google.genai import types
-
     # Gemini calls the assistant role "model".
     contents = [
         types.Content(role="model" if m["role"] == "assistant" else "user",
@@ -476,18 +669,23 @@ def _gemini_reply(history, user_turn, attachments=(), system=SERVICE_PROMPT, web
         for m in history
     ]
     contents.append(types.Content(role="user", parts=_gemini_parts(user_turn, attachments)))
+    return contents
 
-    response = _get_gemini_client().models.generate_content(
-        model=current_app.config["GEMINI_MODEL"],
-        contents=contents,
-        config=types.GenerateContentConfig(
-            system_instruction=system,
-            max_output_tokens=MAX_OUTPUT_TOKENS,
-            response_mime_type="application/json",
-            response_json_schema=REPLY_SCHEMA,
-            tools=[types.Tool(google_search=types.GoogleSearch())] if web_search else None,
-        ),
-    )
+
+def _gemini_reply(history, user_turn, attachments=(), system=SERVICE_PROMPT, web_search=False):
+    contents = _gemini_contents(history, user_turn, attachments)
+    config = _gemini_config(system, web_search, json_output=True)
+    models = _gemini_models()
+    for i, model in enumerate(models):
+        try:
+            response = _get_gemini_client().models.generate_content(
+                model=model, contents=contents, config=config)
+            break
+        except Exception as exc:
+            if (i == len(models) - 1 or not _is_overloaded(exc)
+                    or (web_search and _is_quota_error(exc))):   # search quota covers every model
+                raise
+            log.warning("%s unavailable (%s); trying %s", model, str(exc)[:80], models[i + 1])
     # A safety block (or any other stop without output) comes back with no text.
     if not response.text:
         return _declined("gemini")

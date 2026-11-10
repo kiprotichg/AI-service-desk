@@ -821,3 +821,9 @@ td select { padding: 4px 8px; }
   .header-center { overflow: visible; }
   .title-btn { max-width: min(380px, 100%); }
 }
+/* Answer being written: a blinking cursor after the words so far. */
+.assistant-text.streaming::after {
+  content: "▍"; margin-left: 1px; color: var(--accent); animation: caret-blink 1s steps(2, start) infinite;
+}
+@keyframes caret-blink { to { visibility: hidden; } }
+@media (prefers-reduced-motion: reduce) { .assistant-text.streaming::after { animation: none; } }

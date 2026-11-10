@@ -30,6 +30,10 @@ class Config:
     # AI_MODEL is the older name for CLAUDE_MODEL and still works.
     CLAUDE_MODEL = os.getenv("CLAUDE_MODEL") or os.getenv("AI_MODEL") or "claude-opus-5-5"
     GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+    # Used straight away when GEMINI_MODEL is overloaded ("503 high demand"); empty = none.
+    GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.1-flash-lite")
+    # How much the model thinks before answering: minimal is fastest. Empty = model default.
+    GEMINI_THINKING = os.getenv("GEMINI_THINKING", "minimal")
     # Only decides whether we try the live model or go straight to the offline
     # responder: true when the chosen provider's key is set.
     AI_ENABLED = any(os.getenv(k) for k in PROVIDER_KEYS.get(AI_PROVIDER, ()))

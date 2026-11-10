@@ -454,6 +454,35 @@ switch with one line.
    is wrong, or the output isn't valid JSON, the offline responder answers instead, so the
    chat never breaks.
 
+### Response speed
+
+Measured with the real Gemini key: almost all of the waiting is the model. The Flask app
+adds about 0.05 s.
+
+- **Streaming:** new messages are sent with `?stream=1` and the answer appears word by
+  word, usually within 1–2 s.
+  - With Gemini, the answer is written as plain text followed by a one-line
+    `<meta>{…}</meta>` block, which holds the intent, ticket details and suggestions.
+    JSON-schema mode made Gemini wait until the whole answer was ready, roughly 3× slower
+    for long answers.
+  - The `<meta>` block is never shown. If it's missing, keyword rules fill in the details.
+  - The response is newline-delimited JSON:
+    - `start` (the saved question)
+    - `delta` (text pieces)
+    - `reset` (drop the half-written answer, if the model failed mid-way)
+    - `done` (the same body as the normal reply)
+    - or `error`
+- **Fallback model:** when `GEMINI_MODEL` answers "503 high demand", the app retries
+  briefly (0.5 s, then 1 s) and then switches to `GEMINI_FALLBACK_MODEL` (default
+  `gemini-3.1-flash-lite`; empty = none). Before, it waited through four slow retries,
+  which once took 15 s.
+- **Thinking:** `GEMINI_THINKING=minimal` (the default) keeps the model's thinking short.
+  Leave it empty for the model's default.
+- **Not streamed:** Regenerate and Edit, and Claude (`AI_PROVIDER=claude`), still
+  return the whole answer at once. They use the same fallback and thinking settings.
+- **Hosting:** if you put a proxy such as nginx in front, turn off response buffering
+  for `/api/` (the app already sends `X-Accel-Buffering: no`).
+
 ---
 
 ## Code review

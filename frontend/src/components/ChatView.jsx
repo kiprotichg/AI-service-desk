@@ -90,9 +90,11 @@ export default function ChatView({ chat, aiMode, chatMode, customerName, greetNa
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const streamingNow = messages.some((m) => m.streaming);
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages, sending]);
+    // Follow the answer as it's written (instant), smooth otherwise.
+    endRef.current?.scrollIntoView({ behavior: streamingNow ? "auto" : "smooth", block: "end" });
+  }, [messages, sending, streamingNow]);
 
   function addFiles(list) {
     setError("");
@@ -136,6 +138,9 @@ export default function ChatView({ chat, aiMode, chatMode, customerName, greetNa
       })),
     }]);
 
+    // The answer appears word by word in this placeholder while it's being written.
+    const answerId = `answer-${tempId}`;
+    let asked = null;   // the saved question, once the server confirms it
     try {
       let current = conv;
       if (!current) {
@@ -148,24 +153,44 @@ export default function ChatView({ chat, aiMode, chatMode, customerName, greetNa
           onPatchChat?.({ id: created.id, token: created.token }, { project_id: pendingProject });
         }
       }
-      const res = await api.sendMessage(current.id, current.token, content,
-        draft.map((f) => f.file), chatMode, webSearch);
-      // Reuse the local copies for display instead of downloading them again.
-      res.user_message.attachments.forEach((a, i) => {
-        const local = draft[i];
-        if (local) rememberLocalUrl(a, local.url || URL.createObjectURL(local.file));
-      });
+      const editAnswer = (fn) =>
+        setMessages((m) => m.map((x) => (x.id === answerId ? { ...x, content: fn(x.content) } : x)));
+      const res = await api.sendMessageStream(current.id, current.token, content,
+        draft.map((f) => f.file), chatMode, webSearch, (ev) => {
+          if (ev.type === "start") {
+            asked = ev.user_message;
+            // Reuse the local copies for display instead of downloading them again.
+            asked.attachments.forEach((a, i) => {
+              const local = draft[i];
+              if (local) rememberLocalUrl(a, local.url || URL.createObjectURL(local.file));
+            });
+            if (!mounted.current) return;
+            setMessages((m) => [...m.filter((x) => x.id !== tempId), asked,
+              { id: answerId, role: "assistant", content: "", streaming: true }]);
+          } else if (ev.type === "delta" && mounted.current) {
+            editAnswer((c) => c + ev.text);
+          } else if (ev.type === "reset" && mounted.current) {
+            editAnswer(() => "");   // a half-written answer is being replaced
+          }
+        });
       onChatChanged(res.conversation, current.token);
       if (!mounted.current) return null;
-      setMessages((m) => [...m.filter((x) => x.id !== tempId), res.user_message, res.reply]);
+      setMessages((m) => [...m.filter((x) => x.id !== tempId && x.id !== answerId && x.id !== res.user_message.id),
+        res.user_message, res.reply]);
       setConv((c) => ({ ...c, ...res.conversation }));
       if (res.ticket) setTicket(res.ticket);
       return res.reply.content;
     } catch (err) {
       if (!mounted.current) return null;
-      setMessages((m) => m.filter((x) => x.id !== tempId));
-      if (override === undefined) { setText(content); setFiles(draft); } // give the draft back
-      setError(err.message);
+      if (asked) {
+        // The question was saved but answering failed: keep it, drop the partial answer.
+        setMessages((m) => m.filter((x) => x.id !== answerId));
+        setError(`${err.message} You can edit your message to send it again.`);
+      } else {
+        setMessages((m) => m.filter((x) => x.id !== tempId));
+        if (override === undefined) { setText(content); setFiles(draft); } // give the draft back
+        setError(err.message);
+      }
       return null;
     } finally {
       if (mounted.current) setSending(false);
@@ -294,7 +319,7 @@ export default function ChatView({ chat, aiMode, chatMode, customerName, greetNa
                   onRegenerate={regenerate} onEdit={editMessage}
                   onSuggest={(s) => send(s)} closed={closed} />
               ))}
-              {sending && (
+              {sending && !streamingNow && (
                 <div className="msg msg-assistant">
                   <div className="avatar" aria-hidden="true" />
                   <div className="typing" aria-label="Assistant is typing"><span /><span /><span /></div>

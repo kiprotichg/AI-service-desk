@@ -134,6 +134,20 @@ export default function Message({ message, token, busy, isLast, hasLater, onRege
     );
   }
 
+  if (message.streaming) {
+    // Being written right now: the words so far (typing dots until the first ones).
+    return (
+      <div className="msg msg-assistant">
+        <div className="avatar" aria-hidden="true"><SparkIcon width={16} height={16} /></div>
+        <div className="assistant-body">
+          {content ? <div className="assistant-text streaming">{content}</div> : (
+            <div className="typing" aria-label="Assistant is typing"><span /><span /><span /></div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="msg msg-assistant">
       <div className="avatar" aria-hidden="true"><SparkIcon width={16} height={16} /></div>

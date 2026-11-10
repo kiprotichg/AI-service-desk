@@ -153,6 +153,53 @@ export const api = {
     return request(`/conversations/${id}/messages`,
       { method: "POST", body, headers: asCustomer(token) });
   },
+  /**
+   * Send a message and get the answer while it's being written. onEvent receives
+   * {type: "start", user_message}, {type: "delta", text} and {type: "reset"}; the
+   * promise resolves with the final {type: "done", reply, conversation, ticket, ...}.
+   */
+  sendMessageStream: async (id, token, content, files = [], mode = "service", webSearch = false,
+    onEvent = () => {}) => {
+    const headers = asCustomer(token);
+    let body;
+    if (files.length) {
+      body = new FormData();
+      body.append("content", content);
+      body.append("mode", mode);
+      body.append("web_search", webSearch ? "true" : "false");
+      files.forEach((f) => body.append("files", f, f.name));
+    } else {
+      headers["Content-Type"] = "application/json";
+      body = JSON.stringify({ content, mode, web_search: webSearch });
+    }
+    const res = await fetch(`${BASE}/conversations/${id}/messages?stream=1`,
+      { method: "POST", headers, body });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new ApiError(data.error || `Request failed (${res.status})`, res.status);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let final = null;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (value) buffer += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, nl).trim();
+        buffer = buffer.slice(nl + 1);
+        if (!line) continue;
+        const event = JSON.parse(line);
+        if (event.type === "error") throw new ApiError(event.error, 500);
+        if (event.type === "done") final = event;
+        else onEvent(event);
+      }
+      if (done) break;
+    }
+    if (!final) throw new ApiError("The answer was cut off. Please try again.", 0);
+    return final;
+  },
   /** Replace the latest assistant reply with a new answer. */
   regenerate: (id, token, messageId, mode, webSearch = false) =>
     request(`/conversations/${id}/messages/${messageId}/regenerate`,
