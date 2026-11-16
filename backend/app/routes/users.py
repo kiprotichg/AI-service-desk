@@ -1,6 +1,7 @@
 """User accounts: register, sign in, forgot / reset password, and the user's chats."""
 import hashlib
 import hmac
+import logging
 import re
 import secrets
 from datetime import timedelta, timezone
@@ -14,12 +15,21 @@ from ..extensions import db
 from ..models import Conversation, PasswordReset, User, utcnow
 from ..services.mailer import send_email
 
+log = logging.getLogger(__name__)
+
+
+def _masked(email):
+    """jane@example.com -> ja***@example.com, for logs."""
+    name, _, domain = email.partition("@")
+    return f"{name[:2]}***@{domain}"
+
 bp = Blueprint("users", __name__, url_prefix="/api/users")
 
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _DUMMY_HASH = generate_password_hash("not-a-real-password")
-GENERIC_RESET_REPLY = ("If an account exists for that email, a reset code is on its way. "
-                       "It expires in {minutes} minutes.")
+GENERIC_RESET_REPLY = ("If an account exists for {email}, a reset code is on its way. It expires "
+                       "in {minutes} minutes. Nothing after a few minutes? Check your spam folder, "
+                       "and make sure this is the email you used to create your account.")
 
 
 def _error(msg, code=400):
@@ -229,14 +239,20 @@ def forgot_password():
     problem = _email_problem(email)
     if problem:
         return _error(problem)
-    reply = {"message": GENERIC_RESET_REPLY.format(minutes=cfg["RESET_CODE_MINUTES"])}
+    reply = {"message": GENERIC_RESET_REPLY.format(email=email, minutes=cfg["RESET_CODE_MINUTES"])}
 
     user = User.query.filter_by(email=email, is_active=True).first()
     if user is None:
+        # The page can't say so (that would reveal who has an account), but the
+        # backend window can: this is the usual reason for "I got no reset email".
+        log.warning("Password reset asked for %s, which has no account: no email sent.",
+                    _masked(email))
         return jsonify(reply)
     code = _issue_code(user, "reset")
-    if code is None:
-        return jsonify(reply)  # a code was just sent; don't flood their inbox
+    if code is None:   # a code was just sent; don't flood their inbox
+        log.warning("Password reset for %s asked again within a minute: the earlier code "
+                    "still works, no new email sent.", _masked(email))
+        return jsonify(reply)
     send_email(
         user.email, "Your AI in Ideal password reset code",
         f"Hello {user.name},\n\n"

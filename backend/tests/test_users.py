@@ -127,7 +127,10 @@ def test_forgot_password_for_unknown_email_looks_the_same(client, outbox):
     register(client)
     known = client.post("/api/users/forgot-password", json={"email": "jane@example.com"})
     unknown = client.post("/api/users/forgot-password", json={"email": "ghost@example.com"})
-    assert known.get_json() == unknown.get_json() and unknown.status_code == 200
+    # Same reply apart from repeating the address that was typed.
+    same = lambda r, e: r.get_json()["message"].replace(e, "EMAIL")
+    assert same(known, "jane@example.com") == same(unknown, "ghost@example.com")
+    assert unknown.status_code == 200
     assert len(outbox) == 1  # only the real account got an email
 
 
@@ -243,3 +246,24 @@ def test_claiming_chats_started_before_accounts(app, client):
 def test_config_reports_email_and_login(client):
     body = client.get("/api/config").get_json()
     assert body["email_enabled"] is False and body["require_login"] is True
+
+
+def test_reset_for_unknown_email_is_logged_not_sent(client, caplog, monkeypatch):
+    """The page can't say the email has no account, but the backend log does."""
+    sent = []
+    monkeypatch.setattr("app.routes.users.send_email", lambda *a: sent.append(a))
+    res = client.post("/api/users/forgot-password", json={"email": "nobody@idealdynamics.co.ke"})
+    msg = res.get_json()["message"]
+    assert "nobody@idealdynamics.co.ke" in msg and "spam" in msg and "create your account" in msg
+    assert sent == []
+    assert "no***@idealdynamics.co.ke, which has no account" in caplog.text
+    assert "nobody@" not in caplog.text          # the log doesn't spell out the address
+
+
+def test_quick_second_reset_request_is_logged(client, caplog, monkeypatch):
+    sent = []
+    monkeypatch.setattr("app.routes.users.send_email", lambda *a: sent.append(a))
+    register(client)
+    client.post("/api/users/forgot-password", json={"email": "jane@example.com"})
+    client.post("/api/users/forgot-password", json={"email": "jane@example.com"})
+    assert len(sent) == 1 and "asked again within a minute" in caplog.text
