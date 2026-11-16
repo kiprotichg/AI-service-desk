@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 
 from flask import current_app
 
-from . import knowledge_base
+from . import erp_tools, knowledge_base
 
 log = logging.getLogger(__name__)
 
@@ -176,11 +176,13 @@ class AIReply:
     customer_site: str = ""   # customer location/branch (Service mode)
     suggestions: list = field(default_factory=list)  # follow-up questions to offer
     sources: list = field(default_factory=list)      # [{"title", "url"}] from web search
+    erp_lookups: list = field(default_factory=list)  # names of ERP lookups the answer used
     notice: str = ""                                  # e.g. web search couldn't be used
     source: str = "offline"  # "claude" | "gemini" | "offline"
 
 
-def generate_reply(history, user_message, attachments=(), mode="service", web_search=False):
+def generate_reply(history, user_message, attachments=(), mode="service", web_search=False,
+                   erp_lookups=False):
     """Reply to user_message (plus any uploaded files).
 
     history: [{"role", "content", "attachments": [FilePart]}] oldest first,
@@ -189,9 +191,17 @@ def generate_reply(history, user_message, attachments=(), mode="service", web_se
     (answers anything, never opens tickets).
     web_search: let the model search the web (Gemini: Google Search grounding;
     Claude: the web search tool). If that call fails, it's retried without search.
+    erp_lookups: let the model look up live ERP data (Gemini only; see erp_tools).
     """
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
+    if erp_lookups and _uses_erp(mode):
+        reply = None
+        for kind, value in stream_reply(history, user_message, attachments, mode, web_search,
+                                        erp_lookups=True):
+            if kind == "done":
+                reply = value
+        return reply
     attachments = list(attachments)
     # Service and Sales each search their own articles; General uses none.
     faqs = (knowledge_base.search(user_message, module=mode)
@@ -283,7 +293,14 @@ never mentions this block. Example ending:
 <meta>{"intent": "general", "sentiment": "neutral", "escalate": false, "ticket_subject": "", "serial_number": "", "customer_site": "", "suggestions": ["...", "...", "..."]}</meta>"""
 
 
-def stream_reply(history, user_message, attachments=(), mode="service", web_search=False):
+def _uses_erp(mode):
+    """ERP lookups are offered in Service and Sales mode, when the provider is Gemini."""
+    cfg = current_app.config
+    return mode in ("service", "sales") and cfg["AI_ENABLED"] and cfg["AI_PROVIDER"] == "gemini"
+
+
+def stream_reply(history, user_message, attachments=(), mode="service", web_search=False,
+                 erp_lookups=False):
     """Like generate_reply, but yields the answer while it's being written.
 
     Yields ("delta", text) pieces, possibly ("reset", None) if a half-written answer
@@ -294,7 +311,7 @@ def stream_reply(history, user_message, attachments=(), mode="service", web_sear
         raise ValueError(f"mode must be one of {MODES}")
     cfg = current_app.config
     if not (cfg["AI_ENABLED"] and cfg["AI_PROVIDER"] == "gemini"):
-        reply = generate_reply(history, user_message, attachments, mode, web_search)
+        reply = generate_reply(history, user_message, attachments, mode, web_search)  # no lookups
         yield ("delta", reply.reply)
         yield ("done", reply)
         return
@@ -305,13 +322,14 @@ def stream_reply(history, user_message, attachments=(), mode="service", web_sear
             if user_message and mode != "general" else [])
     history = history[-cfg["MAX_HISTORY_MESSAGES"]:]
     try_search = web_search and time.monotonic() >= _search_off_until
+    lookups = erp_lookups and _uses_erp(mode)
+    system = PROMPTS[mode] + (erp_tools.instructions() if lookups else "") + STREAM_FORMAT
     for search in ([True, False] if try_search else [False]):
         started = False
         try:
             turn = _user_turn(user_message, faqs, attachments, mode, search)
-            for kind, value in _gemini_stream(history, turn, attachments,
-                                              PROMPTS[mode] + STREAM_FORMAT, search,
-                                              mode, user_message):
+            for kind, value in _gemini_stream(history, turn, attachments, system, search,
+                                              mode, user_message, lookups=lookups):
                 if kind == "delta":
                     started = True
                     yield ("delta", value)
@@ -414,9 +432,15 @@ def _gemini_models():
     return models
 
 
-def _gemini_config(system, web_search, json_output=False):
+def _gemini_config(system, web_search, json_output=False, lookups=False, allow_calls=True):
     from google.genai import types
     extra = {}
+    tools = [types.Tool(google_search=types.GoogleSearch())] if web_search else []
+    if lookups:
+        tools.append(erp_tools.gemini_tool())
+        if not allow_calls:   # last round: answer with what was found, no more lookups
+            extra["tool_config"] = types.ToolConfig(
+                function_calling_config=types.FunctionCallingConfig(mode="NONE"))
     level = current_app.config.get("GEMINI_THINKING")
     if level:
         extra["thinking_config"] = types.ThinkingConfig(thinking_level=level)
@@ -424,26 +448,70 @@ def _gemini_config(system, web_search, json_output=False):
         extra.update(response_mime_type="application/json", response_json_schema=REPLY_SCHEMA)
     return types.GenerateContentConfig(
         system_instruction=system, max_output_tokens=MAX_OUTPUT_TOKENS,
-        tools=[types.Tool(google_search=types.GoogleSearch())] if web_search else None, **extra)
+        tools=tools or None, **extra)
 
 
-def _gemini_stream(history, user_turn, attachments, system, web_search, mode, user_message):
+MAX_LOOKUP_ROUNDS = 3
+
+
+def _chunk_parts(chunk):
+    try:
+        return list(chunk.candidates[0].content.parts or [])
+    except (AttributeError, IndexError, TypeError):
+        return []
+
+
+def _lookup_responses(calls, used):
+    """Run the ERP lookups the model asked for; one function_response part per call."""
+    from google.genai import types
+    parts = []
+    for call in calls:
+        used.append(call.name)
+        result = erp_tools.run_lookup(call.name, dict(call.args or {}))
+        parts.append(types.Part(function_response=types.FunctionResponse(
+            name=call.name, response=result, id=getattr(call, "id", None))))
+    return parts
+
+
+def _gemini_stream(history, user_turn, attachments, system, web_search, mode, user_message,
+                   lookups=False):
     """Yield ("delta", text)... then ("reply", AIReply). Tries the fallback model if the
-    main one is overloaded before it has written anything."""
+    main one is overloaded before it has written anything.
+
+    With lookups, the model may ask for ERP data first: those calls are run, their
+    results added to the conversation, and the model asked again (at most
+    MAX_LOOKUP_ROUNDS times) until it writes the answer.
+    """
+    from google.genai import types
     contents = _gemini_contents(history, user_turn, attachments)
-    config = _gemini_config(system, web_search)
     models = _gemini_models()
     for i, model in enumerate(models):
-        splitter, sources, started = _MetaSplitter(), [], False
+        splitter, sources, started, used = _MetaSplitter(), [], False, []
+        convo = list(contents)
         try:
-            for chunk in _get_gemini_client().models.generate_content_stream(
-                    model=model, contents=contents, config=config):
-                piece = splitter.feed(chunk.text or "")
-                if piece:
-                    started = True
-                    yield ("delta", piece)
-                if web_search:
-                    sources = _gemini_sources(chunk) or sources
+            for round_no in range(MAX_LOOKUP_ROUNDS + 1):
+                config = _gemini_config(system, web_search, lookups=lookups,
+                                        allow_calls=round_no < MAX_LOOKUP_ROUNDS)
+                calls, model_parts = [], []
+                for chunk in _get_gemini_client().models.generate_content_stream(
+                        model=model, contents=convo, config=config):
+                    parts = _chunk_parts(chunk)
+                    model_parts += parts
+                    calls += [p.function_call for p in parts if getattr(p, "function_call", None)]
+                    text = "".join(p.text for p in parts if getattr(p, "text", None)
+                                   and not getattr(p, "thought", False)) if parts else (chunk.text or "")
+                    piece = splitter.feed(text)
+                    if piece:
+                        started = True
+                        yield ("delta", piece)
+                    if web_search:
+                        sources = _gemini_sources(chunk) or sources
+                # Lookups run only for users allowed to use them, whatever the model asks for.
+                if not calls or started or not lookups:
+                    break
+                # Keep the model's own parts (they carry its thought signatures) and add the results.
+                convo += [types.Content(role="model", parts=model_parts),
+                          types.Content(role="user", parts=_lookup_responses(calls, used))]
         except Exception as exc:
             if (started or i == len(models) - 1 or not _is_overloaded(exc)
                     or (web_search and _is_quota_error(exc))):   # search quota covers every model
@@ -458,6 +526,7 @@ def _gemini_stream(history, user_turn, attachments, system, web_search, mode, us
             return
         reply = _reply_from_stream(splitter.visible, splitter.meta(), mode, user_message, "gemini")
         reply.sources = sources
+        reply.erp_lookups = used
         yield ("reply", reply)
         return
 

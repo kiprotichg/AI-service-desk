@@ -34,6 +34,23 @@ class Config:
     GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.1-flash-lite")
     # How much the model thinks before answering: minimal is fastest. Empty = model default.
     GEMINI_THINKING = os.getenv("GEMINI_THINKING", "minimal")
+
+    # Live, read-only access to the Dynamics NAV / Business Central database.
+    # Use a login that can only read (db_datareader). Off while any of these is empty.
+    ERP_DB_HOST = os.getenv("ERP_DB_HOST", "")
+    ERP_DB_PORT = os.getenv("ERP_DB_PORT", "")
+    ERP_DB_NAME = os.getenv("ERP_DB_NAME", "")
+    ERP_DB_USER = os.getenv("ERP_DB_USER", "")
+    ERP_DB_PASSWORD = os.getenv("ERP_DB_PASSWORD", "")
+    ERP_COMPANY = os.getenv("ERP_COMPANY", "")          # e.g. IDEALDYNAMICS_PROP
+    # New accounts must confirm their email with an emailed code before signing in.
+    REQUIRE_EMAIL_VERIFICATION = os.getenv("REQUIRE_EMAIL_VERIFICATION", "true").lower() == "true"
+    # Only users whose email is at one of these domains get ERP lookups in chat
+    # (comma separated, e.g. "idealdynamics.co.ke"). Empty = nobody.
+    ERP_ALLOWED_EMAIL_DOMAINS = os.getenv("ERP_ALLOWED_EMAIL_DOMAINS", "")
+    ERP_ODBC_DRIVER = os.getenv("ERP_ODBC_DRIVER", "ODBC Driver 18 for SQL Server")
+    # Most on-premises SQL Servers use a self-signed certificate; set false if yours is trusted.
+    ERP_TRUST_CERT = os.getenv("ERP_TRUST_CERT", "true").lower() == "true"
     # Only decides whether we try the live model or go straight to the offline
     # responder: true when the chosen provider's key is set.
     AI_ENABLED = any(os.getenv(k) for k in PROVIDER_KEYS.get(AI_PROVIDER, ()))
@@ -76,6 +93,10 @@ class TestConfig(Config):
     HELPDESK_WHATSAPP_NUMBER = ""
     HELPDESK_NAME = "ICT Help Desk"
     HELPDESK_HOURS = ""
+    ERP_DB_HOST = ERP_DB_NAME = ERP_DB_USER = ERP_DB_PASSWORD = ERP_COMPANY = ""
+    ERP_ALLOWED_EMAIL_DOMAINS = ""
+    # Most tests sign up and use the account straight away; test_verification.py turns it on.
+    REQUIRE_EMAIL_VERIFICATION = False
     # Most tests exercise chat features without accounts; test_users.py turns it on.
     REQUIRE_USER_LOGIN = False
     SMTP_HOST = ""

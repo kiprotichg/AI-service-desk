@@ -63,6 +63,115 @@ def _code_hash(user_id, code):
     return hmac.new(key, f"{user_id}:{code}".encode(), hashlib.sha256).hexdigest()
 
 
+# ------------------------------------------------------------ emailed codes
+def _codes(user, purpose):
+    q = PasswordReset.query.filter(PasswordReset.user_id == user.id)
+    if purpose == "reset":   # rows from before codes had a purpose are reset codes
+        return q.filter(db.or_(PasswordReset.purpose == "reset", PasswordReset.purpose.is_(None)))
+    return q.filter(PasswordReset.purpose == purpose)
+
+
+def _issue_code(user, purpose):
+    """A fresh 6-digit code (older ones stop working), or None if one was sent moments ago."""
+    cfg = current_app.config
+    latest = _codes(user, purpose).order_by(PasswordReset.id.desc()).first()
+    if latest and (utcnow() - _as_utc(latest.created_at)).total_seconds() < \
+            cfg["RESET_CODE_RESEND_SECONDS"]:
+        return None   # don't flood their inbox
+    _codes(user, purpose).filter(PasswordReset.used.is_(False)).update(
+        {"used": True}, synchronize_session=False)
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    db.session.add(PasswordReset(
+        user_id=user.id, purpose=purpose, code_hash=_code_hash(user.id, code),
+        expires_at=utcnow() + timedelta(minutes=cfg["RESET_CODE_MINUTES"])))
+    db.session.commit()
+    return code
+
+
+def _open_code(user, purpose, code):
+    """The user's current code of this kind, if it's usable and `code` looks like one."""
+    entry = (_codes(user, purpose).filter(PasswordReset.used.is_(False))
+             .order_by(PasswordReset.id.desc()).first()) if user else None
+    if entry is None or _as_utc(entry.expires_at) < utcnow() or not re.fullmatch(r"\d{6}", code):
+        return None
+    return entry
+
+
+def _wrong_code(entry, user, code):
+    """Count a try; an error response if the code is wrong or tried too often, else None."""
+    entry.attempts += 1
+    if entry.attempts > current_app.config["RESET_CODE_MAX_ATTEMPTS"]:
+        entry.used = True
+        db.session.commit()
+        return _error("Too many wrong tries. Request a new code.")
+    if not hmac.compare_digest(entry.code_hash, _code_hash(user.id, code)):
+        db.session.commit()  # keep the attempt count
+        return _error(WRONG_CODE)
+    return None
+
+
+WRONG_CODE = "That code is wrong or has expired. Request a new one."
+
+
+# ------------------------------------------------------------ email confirmation
+def _verification_on():
+    return current_app.config.get("REQUIRE_EMAIL_VERIFICATION", True)
+
+
+def _send_verification(user):
+    code = _issue_code(user, "verify")
+    if code:
+        minutes = current_app.config["RESET_CODE_MINUTES"]
+        send_email(
+            user.email, "Confirm your AI in Ideal email",
+            f"Hello {user.name},\n\n"
+            f"Your code to confirm this email address is: {code}\n\n"
+            f"It expires in {minutes} minutes. If you didn't create an AI in Ideal account, "
+            f"you can ignore this email.\n\nAI in Ideal")
+
+
+def _please_verify(user, status, error=None):
+    body = {"verify_required": True, "email": user.email,
+            "message": f"We sent a 6-digit code to {user.email}. Enter it to confirm your email."}
+    if error:
+        body["error"] = error
+    return jsonify(body), status
+
+
+@bp.post("/verify-email")
+def verify_email():
+    """Confirm the email with the emailed code; signs the user in."""
+    data = request.get_json(silent=True) or {}
+    email = _clean_email(data.get("email"))
+    code = re.sub(r"\s", "", str(data.get("code") or ""))
+    user = User.query.filter_by(email=email, is_active=True).first() if email else None
+    if user is not None and user.email_verified:
+        return _error("This email is already confirmed. Please sign in.", 409)
+    entry = _open_code(user, "verify", code)
+    if entry is None:
+        return _error(WRONG_CODE)
+    problem = _wrong_code(entry, user, code)
+    if problem:
+        return problem
+    user.email_verified = True
+    entry.used = True
+    db.session.commit()
+    return _signed_in(user)
+
+
+@bp.post("/resend-verification")
+def resend_verification():
+    """Send a new confirmation code. Answers the same whether or not the email exists."""
+    email = _clean_email((request.get_json(silent=True) or {}).get("email"))
+    problem = _email_problem(email)
+    if problem:
+        return _error(problem)
+    user = User.query.filter_by(email=email, is_active=True).first()
+    if user is not None and not user.email_verified:
+        _send_verification(user)
+    return jsonify({"message": "If that account still needs confirming, a new code is on its way."})
+
+
 # ------------------------------------------------------------- register / sign in
 @bp.post("/register")
 def register():
@@ -77,10 +186,13 @@ def register():
         return _error(problem)
     if User.query.filter_by(email=email).first():
         return _error("An account with this email already exists. Try signing in.", 409)
-    user = User(name=name, email=email)
+    user = User(name=name, email=email, email_verified=False)
     user.set_password(password)
     db.session.add(user)
     db.session.commit()
+    if _verification_on():
+        _send_verification(user)
+        return _please_verify(user, 201)   # signed in once the code is entered
     return _signed_in(user, 201)
 
 
@@ -96,6 +208,9 @@ def login():
         return unauthorized("Incorrect email or password")
     if not user.is_active or not user.check_password(password):
         return unauthorized("Incorrect email or password")
+    if _verification_on() and not user.email_verified:
+        _send_verification(user)
+        return _please_verify(user, 403, "Please confirm your email first.")
     return _signed_in(user)
 
 
@@ -119,18 +234,9 @@ def forgot_password():
     user = User.query.filter_by(email=email, is_active=True).first()
     if user is None:
         return jsonify(reply)
-    latest = (PasswordReset.query.filter_by(user_id=user.id)
-              .order_by(PasswordReset.id.desc()).first())
-    if latest and (utcnow() - _as_utc(latest.created_at)).total_seconds() < \
-            cfg["RESET_CODE_RESEND_SECONDS"]:
+    code = _issue_code(user, "reset")
+    if code is None:
         return jsonify(reply)  # a code was just sent; don't flood their inbox
-
-    PasswordReset.query.filter_by(user_id=user.id, used=False).update({"used": True})
-    code = f"{secrets.randbelow(1_000_000):06d}"
-    db.session.add(PasswordReset(
-        user_id=user.id, code_hash=_code_hash(user.id, code),
-        expires_at=utcnow() + timedelta(minutes=cfg["RESET_CODE_MINUTES"])))
-    db.session.commit()
     send_email(
         user.email, "Your AI in Ideal password reset code",
         f"Hello {user.name},\n\n"
@@ -143,33 +249,25 @@ def forgot_password():
 
 @bp.post("/reset-password")
 def reset_password():
-    cfg = current_app.config
     data = request.get_json(silent=True) or {}
     email = _clean_email(data.get("email"))
     code = re.sub(r"\s", "", str(data.get("code") or ""))
     password = data.get("password") or ""
-    invalid = _error("That code is wrong or has expired. Request a new one.")
 
     user = User.query.filter_by(email=email, is_active=True).first() if email else None
-    reset = (PasswordReset.query.filter_by(user_id=user.id, used=False)
-             .order_by(PasswordReset.id.desc()).first()) if user else None
-    if reset is None or _as_utc(reset.expires_at) < utcnow() or not re.fullmatch(r"\d{6}", code):
-        return invalid
+    reset = _open_code(user, "reset", code)
+    if reset is None:
+        return _error(WRONG_CODE)
     # Check the new password first, so a too-short password doesn't use up a try.
     problem = password_problem(password)
     if problem:
         return _error(problem)
-
-    reset.attempts += 1
-    if reset.attempts > cfg["RESET_CODE_MAX_ATTEMPTS"]:
-        reset.used = True
-        db.session.commit()
-        return _error("Too many wrong tries. Request a new code.")
-    if not hmac.compare_digest(reset.code_hash, _code_hash(user.id, code)):
-        db.session.commit()  # keep the attempt count
-        return invalid
+    wrong = _wrong_code(reset, user, code)
+    if wrong:
+        return wrong
 
     user.set_password(password)  # also signs out every old session (token fingerprint)
+    user.email_verified = True   # the code reached their inbox, so they own the address
     reset.used = True
     db.session.commit()
     return _signed_in(user)

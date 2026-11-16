@@ -373,6 +373,30 @@ After signing in:
 - **Agents are separate:** the agent sign-in under Agent tools still guards Tickets
   and Analytics for support staff, so users can't see each other's tickets.
 
+### Email confirmation
+
+Accounts must prove they own their email before they can sign in. This matters because
+ERP data is only given to confirmed company addresses (`ERP_ALLOWED_EMAIL_DOMAINS`).
+
+- **Creating an account** emails a 6-digit code, and the page switches to
+  **Check your email**. Entering the code confirms the address and signs you in.
+- **Signing in with an unconfirmed account** (right password) sends a new code and
+  shows the same screen.
+- **Accounts from before this feature** confirm once, the next time they sign in. Their
+  saved sign-ins stop working until then.
+- **Codes:** they work the same way as reset codes. Each works once, for 15 minutes, with
+  5 tries. A new one can be requested once a minute, only a keyed hash is stored, and
+  confirmation and reset codes can't be swapped.
+- **Resetting your password** by email also confirms the address.
+- **Resend reply:** "Resend code" answers the same whether or not the email has an account.
+- **Turning it off:** set `REQUIRE_EMAIL_VERIFICATION=false` (not recommended while ERP
+  lookups are on).
+
+API: `POST /api/users/verify-email {email, code}` returns `{token, user}`, and
+`POST /api/users/resend-verification {email}` sends a new code. Registration answers
+`{verify_required: true, email, message}` instead of a token, and signing in to an
+unconfirmed account answers 403 with the same fields.
+
 ### Sending the reset emails
 
 Fill in the SMTP lines in `backend/.env`, then restart the backend:
@@ -453,6 +477,60 @@ switch with one line.
    customer is told a human will help and a ticket is opened. If the API is down, the key
    is wrong, or the output isn't valid JSON, the offline responder answers instead, so the
    chat never breaks.
+
+### ERP data (live, read-only)
+
+In Service and Sales mode, the assistant can look up live data from the Dynamics NAV
+database. It uses Gemini only (`AI_PROVIDER=gemini`).
+
+**Settings** (`backend/.env`):
+
+```
+ERP_DB_HOST=102.210.149.128
+ERP_DB_PORT=2026
+ERP_DB_NAME=IDEALDYNAMICS_TEST
+ERP_DB_USER=ai_reader              # a login with db_datareader only, ideally
+ERP_DB_PASSWORD=...
+ERP_COMPANY=IDEALDYNAMICS_PROP
+ERP_ALLOWED_EMAIL_DOMAINS=idealdynamics.co.ke   # who may use it; empty = nobody
+```
+
+**Who can use it:** only signed-in users whose email domain is in
+`ERP_ALLOWED_EMAIL_DOMAINS`. Anyone can register an account, so this is what keeps
+strangers out. Other users get the normal assistant without lookups, and the server
+refuses to run a lookup for them even if the model asks for one.
+
+**What it can look up** (`app/services/erp_tools.py`):
+
+| Lookup | Answers |
+|---|---|
+| `find_customers` | A customer by number or name: city, salesperson, payment terms, blocked status, number of services |
+| `customer_services` | A customer's service items (guard posts, alarms, cash in transit…) with totals per group |
+| `service_item` | One service item with its recent change history, or items by description |
+| `service_summary` | Number of service items per group or status |
+| `find_contracts` | Service contracts: dates, next invoice date and period |
+| `blocked_customers` | Blocked customers and how many |
+
+**Kept out on purpose:** employees, payroll, resources (national ID and social security
+numbers) and contact phone numbers. IDEALDYNAMICS_PROP has no invoices or ledger entries,
+so there are no balances to report.
+
+**Safeguards** (`app/services/erp.py`):
+- The AI never writes SQL. It can only call the lookups above, which are fixed,
+  parameterised `SELECT`s.
+- Every statement is checked to be a single `SELECT`, runs in a transaction that's
+  always rolled back, and times out after 15 s.
+- At most 200 rows come back from any query.
+- The connection asks for read-only intent, and reads don't take or wait for row locks,
+  so NAV users are never slowed down.
+
+**Setup commands** (run in `backend`):
+- `python -m flask --app run erp-check` tests the connection and warns if the login can
+  change data.
+- `python -m flask --app run erp-tables [--columns Service]` lists the company's tables.
+
+**Speed:** answers that use a lookup take a few seconds longer, about 5–10 s. Gemini
+asks for the data, the lookup itself takes about 0.1 s, then Gemini writes the answer.
 
 ### Response speed
 

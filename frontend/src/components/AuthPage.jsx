@@ -46,7 +46,7 @@ function PasswordRules({ password }) {
  * code sent by email. Calls onAuthed({token, user}, remember) when signed in.
  */
 export default function AuthPage({ onAuthed, emailEnabled }) {
-  const [view, setView] = useState("login");      // login | register | forgot | reset
+  const [view, setView] = useState("login");      // login | register | forgot | reset | verify
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -87,10 +87,27 @@ export default function AuthPage({ onAuthed, emailEnabled }) {
 
   const cleanEmail = email.trim();
 
+  /** Show the "Check your email" screen after the server sent a confirmation code. */
+  function askForCode(reply) {
+    setView("verify");
+    setCode("");
+    setPassword("");
+    setConfirm("");
+    setCooldown(RESEND_SECONDS);
+    setNotice(reply.message || `We sent a 6-digit code to ${cleanEmail}.`);
+  }
+
   function submitLogin(e) {
     e.preventDefault();
     if (!EMAIL.test(cleanEmail)) return setError("Enter a valid email address");
-    run(async () => onAuthed(await api.userLogin(cleanEmail, password), remember));
+    run(async () => {
+      try {
+        onAuthed(await api.userLogin(cleanEmail, password), remember);
+      } catch (err) {
+        if (err.data?.verify_required) askForCode(err.data);   // right password, email not confirmed
+        else throw err;
+      }
+    });
   }
 
   function submitRegister(e) {
@@ -99,7 +116,25 @@ export default function AuthPage({ onAuthed, emailEnabled }) {
     if (!EMAIL.test(cleanEmail)) return setError("Enter a valid email address");
     if (!passwordOk(password)) return setError("Choose a password that meets all the requirements");
     if (password !== confirm) return setError("The passwords don't match");
-    run(async () => onAuthed(await api.register(name.trim(), cleanEmail, password), remember));
+    run(async () => {
+      const res = await api.register(name.trim(), cleanEmail, password);
+      if (res.verify_required) askForCode(res);
+      else onAuthed(res, remember);
+    });
+  }
+
+  function submitVerify(e) {
+    e.preventDefault();
+    if (!/^\d{6}$/.test(code.trim())) return setError("Enter the 6-digit code from the email");
+    run(async () => onAuthed(await api.verifyEmail(cleanEmail, code.trim()), remember));
+  }
+
+  function resendVerification() {
+    run(async () => {
+      const res = await api.resendVerification(cleanEmail);
+      setCooldown(RESEND_SECONDS);
+      setNotice(res.message);
+    });
   }
 
   function sendCode(e) {
@@ -126,6 +161,7 @@ export default function AuthPage({ onAuthed, emailEnabled }) {
     register: ["Create your account", "It only takes a minute."],
     forgot: ["Forgot your password?", "Enter your email and we'll send you a reset code."],
     reset: ["Reset your password", `Enter the code we sent to ${cleanEmail || "your email"}.`],
+    verify: ["Check your email", "Confirm your email address to finish setting up your account."],
   };
 
   const emailField = (autoFocus) => (
@@ -169,7 +205,7 @@ export default function AuthPage({ onAuthed, emailEnabled }) {
           <p className="auth-sub">{titles[view][1]}</p>
 
           {notice && <div className="auth-notice" role="status"><MailIcon width={18} height={18} />
-            <span>{notice}{view === "reset" && !emailEnabled && (
+            <span>{notice}{(view === "reset" || view === "verify") && !emailEnabled && (
               <> Email isn't set up on this server yet, so the code was written to the
                 backend terminal window.</>)}</span></div>}
           {error && <div className="auth-error" role="alert">{error}</div>}
@@ -218,6 +254,29 @@ export default function AuthPage({ onAuthed, emailEnabled }) {
               <button className="auth-submit" disabled={busy}>{busy ? "Sending…" : "Send reset code"}</button>
               <p className="auth-switch">Remembered it?{" "}
                 <button type="button" className="text-link" onClick={() => go("login")}>Back to sign in</button></p>
+            </form>
+          )}
+
+          {view === "verify" && (
+            <form onSubmit={submitVerify} noValidate>
+              <div className="field">
+                <label htmlFor="auth-verify-code">6-digit code</label>
+                <input id="auth-verify-code" className="code-input" value={code} required autoFocus
+                  inputMode="numeric" autoComplete="one-time-code" maxLength={6} placeholder="123456"
+                  onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))} />
+              </div>
+              <p className="auth-hint">The code expires in 15 minutes. Check your spam folder if
+                you can't find the email.</p>
+              <button className="auth-submit" disabled={busy}>
+                {busy ? "Confirming…" : "Confirm email and sign in"}</button>
+              <p className="auth-switch">
+                Didn't get it?{" "}
+                <button type="button" className="text-link" disabled={busy || cooldown > 0}
+                  onClick={resendVerification}>
+                  {cooldown > 0 ? `Resend code in ${cooldown}s` : "Resend code"}</button>
+                {" · "}
+                <button type="button" className="text-link" onClick={() => go("login")}>Back to sign in</button>
+              </p>
             </form>
           )}
 

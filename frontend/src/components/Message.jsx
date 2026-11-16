@@ -155,6 +155,7 @@ export default function Message({ message, token, busy, isLast, hasLater, onRege
         <div className="assistant-text">{content}</div>
         <Sources sources={sources} />
         {message.notice && <p className="reply-notice">{message.notice}</p>}
+        {message.erp_note && <p className="erp-note">{message.erp_note}</p>}
         <div className="msg-actions">
           <CopyButton text={content} label="Copy reply" />
           {isLast && saved && (

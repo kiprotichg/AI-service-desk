@@ -8,8 +8,8 @@ from flask import Blueprint, current_app, jsonify, request, stream_with_context
 from ..auth import (agent_required, current_agent, current_user, has_conversation_access,
                     issue_conversation_token, unauthorized)
 from ..extensions import db
-from ..models import Conversation, Message, Project, Ticket, utcnow
-from ..services import ai_service, attachments
+from ..models import Conversation, Message, Project, Ticket, User, utcnow
+from ..services import ai_service, attachments, erp_tools
 
 bp = Blueprint("chat", __name__, url_prefix="/api/conversations")
 
@@ -103,6 +103,12 @@ def _ai_input(user_msg, prior):
     return history, current_parts
 
 
+def _erp_allowed(conv):
+    """Live ERP lookups only for the chat owner's account, if its email domain is allowed."""
+    owner = db.session.get(User, conv.user_id) if conv.user_id else None
+    return erp_tools.user_may_use(owner)
+
+
 def _answer(conv, user_msg, prior, mode, web_search=False):
     """Ask the AI to reply to user_msg (given the earlier messages) and store the reply.
 
@@ -111,7 +117,7 @@ def _answer(conv, user_msg, prior, mode, web_search=False):
     """
     history, current_parts = _ai_input(user_msg, prior)
     ai = ai_service.generate_reply(history, user_msg.content, current_parts, mode=mode,
-                                   web_search=web_search)
+                                   web_search=web_search, erp_lookups=_erp_allowed(conv))
     bot_msg, ticket = _store_answer(conv, user_msg, ai, mode)
     return ai, bot_msg, ticket
 
@@ -158,13 +164,15 @@ def _stream_answer(conv, user_msg, prior, mode, web_search):
     history, parts = _ai_input(user_msg, prior)
     question = user_msg.to_dict()
     conv_id, msg_id = conv.id, user_msg.id
+    erp_lookups = _erp_allowed(conv)
 
     def events():
         yield _ndjson({"type": "start", "user_message": question})
         try:
             ai = None
             for kind, value in ai_service.stream_reply(history, question["content"], parts,
-                                                       mode=mode, web_search=web_search):
+                                                       mode=mode, web_search=web_search,
+                                                       erp_lookups=erp_lookups):
                 if kind == "delta":
                     yield _ndjson({"type": "delta", "text": value})
                 elif kind == "reset":
@@ -189,7 +197,10 @@ def _stream_answer(conv, user_msg, prior, mode, web_search):
 
 
 def _reply_body(conv, ai, bot_msg, ticket, **extra):
-    return {"reply": {**bot_msg.to_dict(), "notice": ai.notice}, "source": ai.source,
+    erp_note = (f"Includes live data from the ERP ({current_app.config.get('ERP_COMPANY')})."
+                if ai.erp_lookups else "")
+    return {"reply": {**bot_msg.to_dict(), "notice": ai.notice, "erp_note": erp_note},
+            "source": ai.source,
             "conversation": conv.to_dict(),
             "ticket": ticket.to_dict() if ticket else None, **extra}
 

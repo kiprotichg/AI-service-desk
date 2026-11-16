@@ -59,7 +59,8 @@ def test_register_signs_you_in(client):
     body = res.get_json()
     assert res.status_code == 201
     assert body["user"] == {"id": body["user"]["id"], "name": "Jane Doe",
-                            "email": "jane@example.com"}       # email stored lower-case
+                            "email": "jane@example.com",        # email stored lower-case
+                            "email_verified": False}           # (verification is off here)
     me = client.get("/api/users/me", headers=auth(body["token"]))
     assert me.get_json()["email"] == "jane@example.com"
 

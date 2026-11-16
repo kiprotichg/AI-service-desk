@@ -7,3 +7,4 @@ google-genai>=2.34,<3
 pytest>=8.0
 gunicorn
 psycopg[binary]
+pyodbc

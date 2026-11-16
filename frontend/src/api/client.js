@@ -3,9 +3,10 @@ const AGENT_KEY = "agentSession";
 const USER_KEY = "userSession";
 
 export class ApiError extends Error {
-  constructor(message, status) {
+  constructor(message, status, data = {}) {
     super(message);
     this.status = status;
+    this.data = data;   // the server's full reply, e.g. {verify_required, email}
   }
 }
 
@@ -69,7 +70,7 @@ async function request(path, { method = "GET", body, headers = {}, raw = false,
   if (raw && res.ok) return res;
   if (res.status === 204) return null;
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError(data.error || `Request failed (${res.status})`, res.status);
+  if (!res.ok) throw new ApiError(data.error || `Request failed (${res.status})`, res.status, data);
   return data;
 }
 
@@ -121,6 +122,11 @@ export const api = {
     request("/users/forgot-password", { method: "POST", body: { email } }),
   resetPassword: (email, code, password) =>
     request("/users/reset-password", { method: "POST", body: { email, code, password } }),
+  /** Confirm the email with the emailed code; returns {token, user}. */
+  verifyEmail: (email, code) =>
+    request("/users/verify-email", { method: "POST", body: { email, code } }),
+  resendVerification: (email) =>
+    request("/users/resend-verification", { method: "POST", body: { email } }),
   myChats: () => userRequest("/users/me/conversations"),
   claimChats: (tokens) =>
     userRequest("/users/me/claim-chats", { method: "POST", body: { tokens } }),

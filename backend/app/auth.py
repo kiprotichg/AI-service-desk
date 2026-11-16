@@ -82,6 +82,7 @@ def current_user():
                      current_app.config["USER_TOKEN_MAX_AGE"])
         user = db.session.get(User, data.get("uid")) if isinstance(data, dict) else None
         ok = (user is not None and user.is_active
+              and (user.email_verified or not current_app.config["REQUIRE_EMAIL_VERIFICATION"])
               and hmac.compare_digest(str(data.get("pv", "")), _password_fingerprint(user)))
         g.user = user if ok else None
     return g.user

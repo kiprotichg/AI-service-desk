@@ -36,6 +36,9 @@ class User(db.Model):
     email = db.Column(db.String(254), unique=True, nullable=False)  # stored lower-case
     password_hash = db.Column(db.String(256), nullable=False)
     is_active = db.Column(db.Boolean, default=True, nullable=False)
+    # Set once the user enters the code emailed to them (or resets their password by
+    # email). Accounts from before verification existed are NULL: they confirm once.
+    email_verified = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
 
     def set_password(self, password):
@@ -45,12 +48,15 @@ class User(db.Model):
         return check_password_hash(self.password_hash, password)
 
     def to_dict(self):
-        return {"id": self.id, "name": self.name, "email": self.email}
+        return {"id": self.id, "name": self.name, "email": self.email,
+                "email_verified": bool(self.email_verified)}
 
 
 class PasswordReset(db.Model):
-    """A 6-digit reset code emailed to a user. Only a keyed hash of the code is stored."""
+    """A 6-digit code emailed to a user: to reset the password, or to confirm the email.
+    Only a keyed hash of the code is stored."""
     id = db.Column(db.Integer, primary_key=True)
+    purpose = db.Column(db.String(20), default="reset")   # reset | verify (NULL = reset)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
     code_hash = db.Column(db.String(64), nullable=False)
     expires_at = db.Column(db.DateTime(timezone=True), nullable=False)

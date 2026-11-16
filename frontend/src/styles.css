@@ -827,3 +827,7 @@ td select { padding: 4px 8px; }
 }
 @keyframes caret-blink { to { visibility: hidden; } }
 @media (prefers-reduced-motion: reduce) { .assistant-text.streaming::after { animation: none; } }
+/* Under answers that used live ERP lookups. */
+.erp-note { margin: 8px 0 0; font-size: .78rem; color: var(--accent); display: flex; align-items: center; gap: 6px; }
+.erp-note::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); flex-shrink: 0; }
+.auth-hint { margin: -4px 0 0; font-size: .8rem; color: var(--muted); }

@@ -77,6 +77,54 @@ def create_app(config_class=Config):
             raise click.ClickException(str(exc)) from exc
         click.echo(f"Sent. Check the inbox (and spam folder) of {to}.")
 
+    @app.cli.command("erp-check")
+    def erp_check():
+        """Test the ERP database connection and show what the login is allowed to do."""
+        from .services import erp
+        missing = erp.missing_settings(app)
+        if missing:
+            raise click.ClickException(f"Fill in {', '.join(missing)} in backend/.env first.")
+        cfg = app.config
+        click.echo(f"Connecting to {cfg['ERP_DB_HOST']},{cfg['ERP_DB_PORT'] or 1433} / "
+                   f"{cfg['ERP_DB_NAME']} as {cfg['ERP_DB_USER']} ...")
+        try:
+            info, perms, companies = erp.connection_report()
+        except Exception as exc:   # driver, network, login: show the server's own message
+            raise click.ClickException(f"Couldn't connect: {exc}") from exc
+        click.echo(f"Connected: {info['version'].splitlines()[0]}")
+        click.echo(f"Database {info['db']}, login {info['login']}")
+        writes = [k.split('_', 1)[1] for k in ("can_insert", "can_update", "can_delete") if perms[k]]
+        if perms["is_sysadmin"] or perms["is_owner"] or writes:
+            click.secho("WARNING: this login can change data"
+                        f" ({'sysadmin' if perms['is_sysadmin'] else 'db_owner' if perms['is_owner'] else ', '.join(writes)})."
+                        " The app only ever reads, but a read-only login (db_datareader) is safer.",
+                        fg="yellow")
+        else:
+            click.secho("Read-only login: the database will refuse any change. Good.", fg="green")
+        click.echo(f"{len(companies)} companies: {', '.join(companies)}")
+        company = cfg["ERP_COMPANY"]
+        if company in companies:
+            click.secho(f"ERP_COMPANY {company!r} found.", fg="green")
+        else:
+            raise click.ClickException(f"ERP_COMPANY {company!r} isn't one of these companies.")
+
+    @app.cli.command("erp-tables")
+    @click.option("--columns", "columns_of", default="", help="Also list the columns of tables whose name contains this text.")
+    @click.option("--all", "show_all", is_flag=True, help="Include empty tables.")
+    def erp_tables(columns_of, show_all):
+        """List the configured company's tables with their row counts."""
+        from .services import erp
+        try:
+            tables = erp.company_tables(with_rows_only=not show_all)
+        except Exception as exc:
+            raise click.ClickException(str(exc)) from exc
+        for t in tables:
+            click.echo(f"{t['row_count']:>9}  {t['table']}")
+            if columns_of and columns_of.lower() in t["table"].lower():
+                cols = erp.table_columns(t["table"])
+                click.echo("           " + ", ".join(c["column_name"] for c in cols))
+        click.echo(f"{len(tables)} tables")
+
     with app.app_context():
         db.create_all()
         _add_missing_columns()
