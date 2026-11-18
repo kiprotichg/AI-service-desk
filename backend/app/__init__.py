@@ -1,6 +1,7 @@
 import logging
 import os
 import secrets
+import threading
 
 import click
 from flask import Flask, jsonify
@@ -132,7 +133,33 @@ def create_app(config_class=Config):
         seed_faqs()
         seed_agent(app.config["AGENT_USERNAME"], app.config["AGENT_PASSWORD"])
 
+    from .services import erp
+    if erp.erp_enabled(app) and not app.config.get("TESTING"):
+        # In the background, so a slow or blocked ERP server never delays startup.
+        threading.Thread(target=erp_startup_check, args=(app,), daemon=True).start()
     return app
+
+
+def erp_startup_check(app):
+    """Write one clear line to the log: can this server reach the ERP database?
+
+    Hosts like Render only show logs, so this is the quickest way to see a firewall,
+    password or address problem. The password never appears in the message.
+    """
+    from .services import erp
+    cfg = app.config
+    driver = erp.choose_driver(cfg)
+    where = f"{cfg['ERP_DB_HOST']}:{cfg.get('ERP_DB_PORT') or 1433}/{cfg['ERP_DB_NAME']} as {cfg['ERP_DB_USER']}"
+    with app.app_context():
+        try:
+            erp.query("SELECT 1 AS ok")
+            log.warning("ERP check: connected to %s using %s.", where, driver)
+            return True
+        except Exception as exc:   # report it, never crash the app
+            reason = " ".join(str(exc).split())[:400].replace(cfg["ERP_DB_PASSWORD"], "***")
+            log.error("ERP check FAILED for %s using %s: %s: %s", where, driver,
+                      type(exc).__name__, reason)
+            return False
 
 
 def _add_missing_columns():

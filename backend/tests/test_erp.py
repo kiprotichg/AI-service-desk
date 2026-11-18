@@ -123,3 +123,16 @@ def test_pymssql_url_keeps_odd_passwords_intact():
     url = erp._pymssql_url(dict(SETTINGS, ERP_DB_PASSWORD="p@ss:w/rd;#1"))
     assert url.drivername == "mssql+pymssql" and url.port == 2026
     assert url.password == "p@ss:w/rd;#1" and url.host == "102.0.0.1"
+
+
+def test_startup_check_logs_success_and_failure(app, fake_erp, caplog, monkeypatch):
+    from app import erp_startup_check
+    assert erp_startup_check(app) is True
+    assert "ERP check: connected to 102.0.0.1:2026/IDEALDYNAMICS_TEST as ai_reader" in caplog.text
+
+    def refuse(*a, **k):
+        raise RuntimeError("Adaptive Server is unavailable or does not exist (102.0.0.1) p;ss{word}")
+    monkeypatch.setattr(erp, "query", refuse)
+    assert erp_startup_check(app) is False
+    assert "ERP check FAILED" in caplog.text and "Adaptive Server is unavailable" in caplog.text
+    assert "p;ss{word}" not in caplog.text          # the password is never logged

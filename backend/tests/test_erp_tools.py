@@ -204,3 +204,15 @@ def test_individually_approved_addresses(app, email, verified, ok):
     app.config.update(ERP, ERP_ALLOWED_EMAILS=" boss@gmail.com , x@y.com", REQUIRE_EMAIL_VERIFICATION=True)
     with app.app_context():
         assert erp_tools.user_may_use(SimpleNamespace(email=email, email_verified=verified)) is ok
+
+
+def test_failed_lookup_gets_no_live_data_note(app, client, monkeypatch):
+    fake, looked_up, conv = _setup(app, monkeypatch, client, "jane@idealdynamics.co.ke")
+    monkeypatch.setattr(erp_tools, "run_lookup",
+                        lambda name, args: {"error": "The ERP database couldn't be reached right now (OperationalError)."})
+    res = client.post(f"/api/conversations/{conv['id']}/messages?stream=1",
+                      headers={"X-Conversation-Token": conv["token"]},
+                      json={"content": "How many services does Kenya Bank have?", "mode": "service"})
+    done = [json.loads(line) for line in res.get_data(as_text=True).splitlines()][-1]
+    assert len(fake.calls) == 2                 # the model still got the error and answered
+    assert done["reply"]["erp_note"] == ""      # ...but without claiming live ERP data

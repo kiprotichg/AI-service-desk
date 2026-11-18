@@ -466,8 +466,9 @@ def _lookup_responses(calls, used):
     from google.genai import types
     parts = []
     for call in calls:
-        used.append(call.name)
         result = erp_tools.run_lookup(call.name, dict(call.args or {}))
+        if "error" not in result:   # only real ERP data earns the "live data" note
+            used.append(call.name)
         parts.append(types.Part(function_response=types.FunctionResponse(
             name=call.name, response=result, id=getattr(call, "id", None))))
     return parts
