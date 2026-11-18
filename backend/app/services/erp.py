@@ -72,27 +72,59 @@ def connection_string(cfg):
     return ";".join(f"{k}={v}" for k, v in parts)
 
 
+def choose_driver(cfg):
+    """"pyodbc" (Microsoft's ODBC driver, used where it's installed, e.g. Windows) or
+    "pymssql" (a self-contained package, used on hosts like Render that can't install
+    the ODBC driver). ERP_DRIVER forces one; "auto" (the default) picks."""
+    wanted = (cfg.get("ERP_DRIVER") or "auto").lower()
+    if wanted in ("pyodbc", "pymssql"):
+        return wanted
+    try:
+        import pyodbc
+        if cfg.get("ERP_ODBC_DRIVER", "ODBC Driver 18 for SQL Server") in pyodbc.drivers():
+            return "pyodbc"
+    except ImportError:   # pyodbc can't load without the system's ODBC library
+        pass
+    return "pymssql"
+
+
+def _pymssql_url(cfg):
+    import sqlalchemy as sa
+    port = int(cfg["ERP_DB_PORT"]) if cfg.get("ERP_DB_PORT") else 1433
+    return sa.engine.URL.create("mssql+pymssql", username=cfg["ERP_DB_USER"],
+                                password=cfg["ERP_DB_PASSWORD"], host=cfg["ERP_DB_HOST"],
+                                port=port, database=cfg["ERP_DB_NAME"])
+
+
 def _engine():
     if not erp_enabled():
         raise ERPNotConfigured("Fill in ERP_DB_HOST, ERP_DB_NAME, ERP_DB_USER and "
                                "ERP_DB_PASSWORD in backend/.env")
-    conn_str = connection_string(current_app.config)
-    engine = _engines.get(conn_str)
+    cfg = current_app.config
+    driver = choose_driver(cfg)
+    key = (driver, connection_string(cfg))
+    engine = _engines.get(key)
     if engine is None:
         import sqlalchemy as sa
-        engine = sa.create_engine(
-            "mssql+pyodbc:///?odbc_connect=" + urllib.parse.quote_plus(conn_str),
+        common = dict(
             pool_pre_ping=True, pool_size=3, max_overflow=2, pool_recycle=1800,
             # Don't wait for (or hold) row locks: NAV users posting documents must never
             # be slowed by the assistant, and lookups mustn't hang behind their locks.
             # The trade-off: a lookup can see a change that's still being saved.
             isolation_level="READ UNCOMMITTED")
+        if driver == "pyodbc":
+            engine = sa.create_engine(
+                "mssql+pyodbc:///?odbc_connect=" + urllib.parse.quote_plus(key[1]), **common)
 
-        @sa.event.listens_for(engine, "connect")
-        def _set_timeout(dbapi_conn, _record):
-            dbapi_conn.timeout = QUERY_TIMEOUT_SECONDS   # pyodbc: per-query timeout
-
-        _engines[conn_str] = engine
+            @sa.event.listens_for(engine, "connect")
+            def _set_timeout(dbapi_conn, _record):
+                dbapi_conn.timeout = QUERY_TIMEOUT_SECONDS   # pyodbc: per-query timeout
+        else:
+            engine = sa.create_engine(
+                _pymssql_url(cfg), **common,
+                connect_args={"login_timeout": 10, "timeout": QUERY_TIMEOUT_SECONDS,
+                              "appname": "AI in Ideal (read-only)"})
+        _engines[key] = engine
     return engine
 
 

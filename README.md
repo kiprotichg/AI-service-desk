@@ -525,6 +525,20 @@ so there are no balances to report.
 - The connection asks for read-only intent, and reads don't take or wait for row locks,
   so NAV users are never slowed down.
 
+**Drivers:** the app connects with Microsoft's ODBC Driver 18 where it's installed (this
+PC), and otherwise with `pymssql`, a self-contained package that works on Linux hosts
+like Render. `ERP_DRIVER=pyodbc` or `ERP_DRIVER=pymssql` forces one; the default is
+`auto`.
+
+**Online (Render):** `backend/.env` is never uploaded. In Render, open your service, then
+**Environment**, and add the same `ERP_DB_HOST`, `ERP_DB_PORT`, `ERP_DB_NAME`,
+`ERP_DB_USER`, `ERP_DB_PASSWORD`, `ERP_COMPANY`, `ERP_ALLOWED_EMAIL_DOMAINS` and
+`ERP_ALLOWED_EMAILS` values.
+- **Firewall:** the SQL Server must accept connections from Render's outbound IP
+  addresses (Render, your service, then **Connect**, then **Outbound**).
+- **Accounts:** the online app has its own accounts, so register and confirm your email
+  there too.
+
 **Setup commands** (run in `backend`):
 - `python -m flask --app run erp-check` tests the connection and warns if the login can
   change data.

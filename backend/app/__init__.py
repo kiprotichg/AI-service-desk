@@ -86,7 +86,7 @@ def create_app(config_class=Config):
             raise click.ClickException(f"Fill in {', '.join(missing)} in backend/.env first.")
         cfg = app.config
         click.echo(f"Connecting to {cfg['ERP_DB_HOST']},{cfg['ERP_DB_PORT'] or 1433} / "
-                   f"{cfg['ERP_DB_NAME']} as {cfg['ERP_DB_USER']} ...")
+                   f"{cfg['ERP_DB_NAME']} as {cfg['ERP_DB_USER']} using {erp.choose_driver(cfg)} ...")
         try:
             info, perms, companies = erp.connection_report()
         except Exception as exc:   # driver, network, login: show the server's own message

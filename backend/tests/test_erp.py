@@ -102,3 +102,24 @@ def test_row_limit(app, fake_erp):
 def test_check_command_without_settings(app):
     result = app.test_cli_runner().invoke(args=["erp-check"])
     assert result.exit_code != 0 and "ERP_DB_HOST" in result.output
+
+
+def test_driver_choice(monkeypatch):
+    import sys
+    import types as t
+    assert erp.choose_driver({"ERP_DRIVER": "pymssql"}) == "pymssql"
+    assert erp.choose_driver({"ERP_DRIVER": "PYODBC"}) == "pyodbc"
+    # auto: the ODBC driver when it's installed...
+    monkeypatch.setitem(sys.modules, "pyodbc", t.SimpleNamespace(drivers=lambda: ["ODBC Driver 18 for SQL Server"]))
+    assert erp.choose_driver({"ERP_DRIVER": "auto"}) == "pyodbc"
+    # ...otherwise pymssql (Linux hosts such as Render have no ODBC driver)
+    monkeypatch.setitem(sys.modules, "pyodbc", t.SimpleNamespace(drivers=lambda: []))
+    assert erp.choose_driver({}) == "pymssql"
+    monkeypatch.setitem(sys.modules, "pyodbc", None)          # import fails
+    assert erp.choose_driver({}) == "pymssql"
+
+
+def test_pymssql_url_keeps_odd_passwords_intact():
+    url = erp._pymssql_url(dict(SETTINGS, ERP_DB_PASSWORD="p@ss:w/rd;#1"))
+    assert url.drivername == "mssql+pymssql" and url.port == 2026
+    assert url.password == "p@ss:w/rd;#1" and url.host == "102.0.0.1"

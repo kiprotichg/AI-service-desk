@@ -51,6 +51,8 @@ class Config:
     # Extra individual addresses allowed ERP lookups (e.g. a manager's Gmail), comma separated.
     ERP_ALLOWED_EMAILS = os.getenv("ERP_ALLOWED_EMAILS", "")
     ERP_ODBC_DRIVER = os.getenv("ERP_ODBC_DRIVER", "ODBC Driver 18 for SQL Server")
+    # auto: Microsoft's ODBC driver where it's installed, else pymssql (e.g. on Render).
+    ERP_DRIVER = os.getenv("ERP_DRIVER", "auto")
     # Most on-premises SQL Servers use a self-signed certificate; set false if yours is trusted.
     ERP_TRUST_CERT = os.getenv("ERP_TRUST_CERT", "true").lower() == "true"
     # Only decides whether we try the live model or go straight to the offline

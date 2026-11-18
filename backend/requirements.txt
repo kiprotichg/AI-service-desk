@@ -8,3 +8,4 @@ pytest>=8.0
 gunicorn
 psycopg[binary]
 pyodbc
+pymssql>=2.3
