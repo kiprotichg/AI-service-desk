@@ -48,6 +48,8 @@ class Config:
     # Only users whose email is at one of these domains get ERP lookups in chat
     # (comma separated, e.g. "idealdynamics.co.ke"). Empty = nobody.
     ERP_ALLOWED_EMAIL_DOMAINS = os.getenv("ERP_ALLOWED_EMAIL_DOMAINS", "")
+    # Extra individual addresses allowed ERP lookups (e.g. a manager's Gmail), comma separated.
+    ERP_ALLOWED_EMAILS = os.getenv("ERP_ALLOWED_EMAILS", "")
     ERP_ODBC_DRIVER = os.getenv("ERP_ODBC_DRIVER", "ODBC Driver 18 for SQL Server")
     # Most on-premises SQL Servers use a self-signed certificate; set false if yours is trusted.
     ERP_TRUST_CERT = os.getenv("ERP_TRUST_CERT", "true").lower() == "true"
@@ -95,6 +97,7 @@ class TestConfig(Config):
     HELPDESK_HOURS = ""
     ERP_DB_HOST = ERP_DB_NAME = ERP_DB_USER = ERP_DB_PASSWORD = ERP_COMPANY = ""
     ERP_ALLOWED_EMAIL_DOMAINS = ""
+    ERP_ALLOWED_EMAILS = ""
     # Most tests sign up and use the account straight away; test_verification.py turns it on.
     REQUIRE_EMAIL_VERIFICATION = False
     # Most tests exercise chat features without accounts; test_users.py turns it on.

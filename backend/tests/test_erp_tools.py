@@ -192,3 +192,15 @@ def test_general_mode_gets_no_lookups(app, client, monkeypatch):
                 headers={"X-Conversation-Token": conv["token"]},
                 json={"content": "Why is the sky blue?", "mode": "general"}).get_data()
     assert not fake.calls[0]["config"].tools
+
+
+@pytest.mark.parametrize("email,verified,ok", [
+    ("Boss@Gmail.com", True, True),          # approved address (any case)
+    ("boss@gmail.com", False, False),        # ...but only once confirmed
+    ("other@gmail.com", True, False),        # same domain, not approved
+    ("jane@idealdynamics.co.ke", True, True),  # company domain still works
+])
+def test_individually_approved_addresses(app, email, verified, ok):
+    app.config.update(ERP, ERP_ALLOWED_EMAILS=" boss@gmail.com , x@y.com", REQUIRE_EMAIL_VERIFICATION=True)
+    with app.app_context():
+        assert erp_tools.user_may_use(SimpleNamespace(email=email, email_verified=verified)) is ok

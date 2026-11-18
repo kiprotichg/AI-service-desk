@@ -34,8 +34,14 @@ def allowed_domains(app=None):
     return {d.strip().lower().lstrip("@") for d in raw.split(",") if d.strip()}
 
 
+def allowed_emails(app=None):
+    raw = (app or current_app).config.get("ERP_ALLOWED_EMAILS", "")
+    return {e.strip().lower() for e in raw.split(",") if "@" in e}
+
+
 def user_may_use(user, app=None):
-    """ERP lookups need ERP settings, a signed-in user and an allowed email domain."""
+    """ERP lookups need ERP settings, a signed-in user with a confirmed email, and that
+    email's domain in ERP_ALLOWED_EMAIL_DOMAINS or the address in ERP_ALLOWED_EMAILS."""
     if user is None or not erp.erp_enabled(app):
         return False
     cfg = (app or current_app).config
@@ -43,8 +49,8 @@ def user_may_use(user, app=None):
         return False   # the domain only counts once they've proved they own the address
     if not (app or current_app).config.get("ERP_COMPANY"):
         return False
-    domain = (user.email or "").rsplit("@", 1)[-1].lower()
-    return domain in allowed_domains(app)
+    email = (user.email or "").strip().lower()
+    return email.rsplit("@", 1)[-1] in allowed_domains(app) or email in allowed_emails(app)
 
 
 # ------------------------------------------------------------------ helpers

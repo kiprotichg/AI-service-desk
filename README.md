@@ -493,10 +493,11 @@ ERP_DB_USER=ai_reader              # a login with db_datareader only, ideally
 ERP_DB_PASSWORD=...
 ERP_COMPANY=IDEALDYNAMICS_PROP
 ERP_ALLOWED_EMAIL_DOMAINS=idealdynamics.co.ke   # who may use it; empty = nobody
+ERP_ALLOWED_EMAILS=someone@gmail.com           # optional: extra approved addresses
 ```
 
-**Who can use it:** only signed-in users whose email domain is in
-`ERP_ALLOWED_EMAIL_DOMAINS`. Anyone can register an account, so this is what keeps
+**Who can use it:** only signed-in users with a **confirmed** email whose domain is in
+`ERP_ALLOWED_EMAIL_DOMAINS`, or whose address is listed in `ERP_ALLOWED_EMAILS`. Anyone can register an account, so this is what keeps
 strangers out. Other users get the normal assistant without lookups, and the server
 refuses to run a lookup for them even if the model asks for one.
 
