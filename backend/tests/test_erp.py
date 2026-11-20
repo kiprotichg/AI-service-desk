@@ -136,3 +136,83 @@ def test_startup_check_logs_success_and_failure(app, fake_erp, caplog, monkeypat
     assert erp_startup_check(app) is False
     assert "ERP check FAILED" in caplog.text and "Adaptive Server is unavailable" in caplog.text
     assert "p;ss{word}" not in caplog.text          # the password is never logged
+
+
+# ------------------------------------------------- hanging connections (Render)
+def _closed_port():
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()          # nothing listens here now: connections are refused at once
+    return port
+
+
+def test_unreachable_server_fails_fast_and_is_remembered(monkeypatch):
+    import time
+    monkeypatch.setattr(erp, "_unreachable_until", {})
+    port = _closed_port()
+    with pytest.raises(erp.ERPUnreachable):
+        erp.ensure_reachable("127.0.0.1", port)
+    calls = []
+    monkeypatch.setattr("socket.create_connection", lambda *a, **k: calls.append(a))
+    t = time.monotonic()
+    with pytest.raises(erp.ERPUnreachable, match="moments ago"):
+        erp.ensure_reachable("127.0.0.1", port)    # within the pause: no new attempt
+    assert calls == [] and time.monotonic() - t < 0.5
+
+
+def test_reachable_server_passes(monkeypatch):
+    import socket
+    monkeypatch.setattr(erp, "_unreachable_until", {("127.0.0.1", 1): 0})
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen()
+    try:
+        erp.ensure_reachable("127.0.0.1", server.getsockname()[1])
+    finally:
+        server.close()
+
+
+def test_new_connections_check_reachability_first(app, monkeypatch):
+    """A pool for an unreachable server raises ERPUnreachable instead of hanging."""
+    monkeypatch.setattr(erp, "_engines", {})
+    monkeypatch.setattr(erp, "_unreachable_until", {})
+    app.config.update(SETTINGS, ERP_DB_HOST="127.0.0.1", ERP_DB_PORT=str(_closed_port()),
+                      ERP_DRIVER="pymssql")
+    with app.app_context():
+        with pytest.raises(Exception) as info:
+            erp.query("SELECT 1 AS ok")
+    assert "ERPUnreachable" in repr(info.value) or isinstance(info.value, erp.ERPUnreachable)
+
+
+def test_unreachable_lookup_gives_a_clear_message(app, monkeypatch):
+    from app.services import erp_tools
+    app.config.update(SETTINGS)
+
+    def unreachable(*a, **k):
+        raise erp.ERPUnreachable("The ERP server 1.2.3.4:2026 isn't answering")
+    monkeypatch.setattr(erp, "query", unreachable)
+    with app.app_context():
+        out = erp_tools.run_lookup("find_customers", {"query": "bank"})
+    assert "isn't answering right now" in out["error"]
+
+
+def test_gunicorn_settings():
+    import runpy
+    from pathlib import Path
+    conf = runpy.run_path(str(Path(__file__).resolve().parents[1] / "gunicorn.conf.py"))
+    assert conf["worker_class"] == "gthread" and conf["threads"] >= 4 and conf["timeout"] >= 120
+
+
+def test_postgres_connections_are_checked_before_use(monkeypatch):
+    import importlib
+    from app import config as config_module
+    monkeypatch.setenv("DATABASE_URL", "postgres://u:p@db.example/app")
+    fresh = importlib.reload(config_module)
+    try:
+        assert fresh.Config.SQLALCHEMY_ENGINE_OPTIONS["pool_pre_ping"] is True
+        assert fresh.Config.SQLALCHEMY_DATABASE_URI.startswith("postgresql://")
+    finally:
+        monkeypatch.delenv("DATABASE_URL")
+        importlib.reload(config_module)

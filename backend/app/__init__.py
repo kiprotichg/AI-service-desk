@@ -135,6 +135,7 @@ def create_app(config_class=Config):
 
     from .services import erp
     if erp.erp_enabled(app) and not app.config.get("TESTING"):
+        erp.preload_driver(app)   # import it here, not in two threads at once
         # In the background, so a slow or blocked ERP server never delays startup.
         threading.Thread(target=erp_startup_check, args=(app,), daemon=True).start()
     return app

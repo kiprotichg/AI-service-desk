@@ -250,6 +250,10 @@ def run_lookup(name, args):
         return fn(**kwargs)
     except TypeError as exc:
         return {"error": f"Bad arguments for {name}: {exc}"}
+    except erp.ERPUnreachable as exc:   # quick, expected failure: no traceback needed
+        log.error("ERP lookup %s failed: %s", name, exc)
+        return {"error": "The ERP server isn't answering right now (network or firewall). "
+                         "Ask the user to try again in a minute."}
     except Exception as exc:   # network, timeout, permissions: tell the model, don't crash
         log.exception("ERP lookup %s failed", name)
         return {"error": f"The ERP database couldn't be reached right now ({type(exc).__name__})."}

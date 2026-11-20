@@ -9,6 +9,8 @@ Safeguards, so the app can never change ERP data even with a stronger login:
   * every query runs in a transaction that is always rolled back;
   * the connection asks for read-only intent, and queries time out after 15 seconds;
   * reads don't take or wait for locks (READ UNCOMMITTED), so NAV users are never blocked;
+  * if the server doesn't answer within REACH_TIMEOUT_SECONDS, lookups fail at once
+    (and for the next UNREACHABLE_PAUSE_SECONDS) instead of hanging the answer;
   * at most MAX_ROWS rows come back from any query.
 
 NAV keeps each company's data in its own tables named "<Company>$<Table>", with
@@ -16,6 +18,9 @@ NAV keeps each company's data in its own tables named "<Company>$<Table>", with
 "CRONUS International Ltd_$Cust_ Ledger Entry").
 """
 import re
+import socket
+import threading
+import time
 import urllib.parse
 from contextlib import contextmanager
 
@@ -25,11 +30,20 @@ MAX_ROWS = 200
 QUERY_TIMEOUT_SECONDS = 15
 REQUIRED = ("ERP_DB_HOST", "ERP_DB_NAME", "ERP_DB_USER", "ERP_DB_PASSWORD")
 
+REACH_TIMEOUT_SECONDS = 5        # is the SQL Server answering at all?
+UNREACHABLE_PAUSE_SECONDS = 30   # after it didn't, fail fast for this long
+
 _engines = {}   # one connection pool per connection string
+_engines_lock = threading.Lock()
+_unreachable_until = {}   # (host, port) -> time.monotonic() until which we don't try
 
 
 class ERPNotConfigured(Exception):
     """The ERP_DB_* settings aren't filled in."""
+
+
+class ERPUnreachable(Exception):
+    """The SQL Server didn't answer (network, firewall or server down)."""
 
 
 class UnsafeQuery(Exception):
@@ -104,28 +118,73 @@ def _engine():
     driver = choose_driver(cfg)
     key = (driver, connection_string(cfg))
     engine = _engines.get(key)
-    if engine is None:
-        import sqlalchemy as sa
-        common = dict(
-            pool_pre_ping=True, pool_size=3, max_overflow=2, pool_recycle=1800,
-            # Don't wait for (or hold) row locks: NAV users posting documents must never
-            # be slowed by the assistant, and lookups mustn't hang behind their locks.
-            # The trade-off: a lookup can see a change that's still being saved.
-            isolation_level="READ UNCOMMITTED")
-        if driver == "pyodbc":
-            engine = sa.create_engine(
-                "mssql+pyodbc:///?odbc_connect=" + urllib.parse.quote_plus(key[1]), **common)
-
-            @sa.event.listens_for(engine, "connect")
-            def _set_timeout(dbapi_conn, _record):
-                dbapi_conn.timeout = QUERY_TIMEOUT_SECONDS   # pyodbc: per-query timeout
-        else:
-            engine = sa.create_engine(
-                _pymssql_url(cfg), **common,
-                connect_args={"login_timeout": 10, "timeout": QUERY_TIMEOUT_SECONDS,
-                              "appname": "AI in Ideal (read-only)"})
-        _engines[key] = engine
+    if engine is not None:
+        return engine
+    with _engines_lock:   # parallel requests must not build two pools
+        engine = _engines.get(key)
+        if engine is None:
+            engine = _engines[key] = _build_engine(cfg, driver, key[1])
     return engine
+
+
+def _build_engine(cfg, driver, conn_str):
+    import sqlalchemy as sa
+    common = dict(
+        pool_pre_ping=True, pool_size=3, max_overflow=2, pool_recycle=1800,
+        # Don't wait for (or hold) row locks: NAV users posting documents must never
+        # be slowed by the assistant, and lookups mustn't hang behind their locks.
+        # The trade-off: a lookup can see a change that's still being saved.
+        isolation_level="READ UNCOMMITTED")
+    if driver == "pyodbc":
+        engine = sa.create_engine(
+            "mssql+pyodbc:///?odbc_connect=" + urllib.parse.quote_plus(conn_str), **common)
+
+        @sa.event.listens_for(engine, "connect")
+        def _set_timeout(dbapi_conn, _record):
+            dbapi_conn.timeout = QUERY_TIMEOUT_SECONDS   # pyodbc: per-query timeout
+    else:
+        engine = sa.create_engine(
+            _pymssql_url(cfg), **common,
+            connect_args={"login_timeout": 10, "timeout": QUERY_TIMEOUT_SECONDS,
+                          "appname": "AI in Ideal (read-only)"})
+
+    host, port = cfg["ERP_DB_HOST"], int(cfg.get("ERP_DB_PORT") or 1433)
+
+    @sa.event.listens_for(engine, "do_connect")
+    def _check_reachable(_dialect, _rec, _cargs, _cparams):
+        # Only when a new connection is opened (pooled ones are reused as is).
+        ensure_reachable(host, port)
+    return engine
+
+
+def ensure_reachable(host, port):
+    """Raise ERPUnreachable quickly if the SQL Server doesn't accept a connection.
+
+    Drivers can wait a long time on an unanswered connection (seen on Render:
+    "Connection timed out" after ~30 s, killing the request). A plain TCP check
+    with a short timeout catches that, and later lookups skip it for a while.
+    """
+    key = (host, port)
+    if time.monotonic() < _unreachable_until.get(key, 0):
+        raise ERPUnreachable(f"The ERP server {host}:{port} isn't answering (checked moments ago).")
+    try:
+        socket.create_connection((host, port), timeout=REACH_TIMEOUT_SECONDS).close()
+    except OSError as exc:
+        _unreachable_until[key] = time.monotonic() + UNREACHABLE_PAUSE_SECONDS
+        raise ERPUnreachable(f"The ERP server {host}:{port} isn't answering ({exc}).") from exc
+    _unreachable_until.pop(key, None)
+
+
+def preload_driver(app):
+    """Import the database driver and SQLAlchemy's SQL Server dialect now, in the main
+    thread. Importing them for the first time from two threads at once (the startup
+    check and a request) left a request waiting on Python's import lock until gunicorn
+    killed it."""
+    import sqlalchemy.dialects.mssql  # noqa: F401
+    if choose_driver(app.config) == "pymssql":
+        import pymssql  # noqa: F401
+    else:
+        import pyodbc  # noqa: F401
 
 
 _READ_ONLY_START = re.compile(r"^\s*(select|with)\b", re.I)

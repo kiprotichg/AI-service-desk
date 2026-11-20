@@ -24,6 +24,11 @@ class Config:
         "postgres://", "postgresql://", 1
     )
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+    # Hosted Postgres (Render) drops idle connections, and a worker killed mid-request
+    # can leave a broken one in the pool ("SSL error: decryption failed or bad record
+    # mac"). Test each connection before use and renew it every 5 minutes.
+    SQLALCHEMY_ENGINE_OPTIONS = ({"pool_pre_ping": True, "pool_recycle": 300}
+                                 if not SQLALCHEMY_DATABASE_URI.startswith("sqlite") else {})
     CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
     # "claude" or "gemini". Each SDK reads its own key from the environment.
     AI_PROVIDER = os.getenv("AI_PROVIDER", "claude").strip().lower()
