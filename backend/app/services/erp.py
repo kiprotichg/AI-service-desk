@@ -16,6 +16,9 @@ NAV keeps each company's data in its own tables named "<Company>$<Table>", with
 "CRONUS International Ltd_$Cust_ Ledger Entry").
 """
 import re
+import socket
+import threading
+import time
 import urllib.parse
 from contextlib import contextmanager
 
@@ -26,10 +29,37 @@ QUERY_TIMEOUT_SECONDS = 15
 REQUIRED = ("ERP_DB_HOST", "ERP_DB_NAME", "ERP_DB_USER", "ERP_DB_PASSWORD")
 
 _engines = {}   # one connection pool per connection string
+_engines_lock = threading.Lock()   # lookups run in parallel threads
+
+# Before a new connection is opened, check the server answers at all. Without this, an
+# unreachable server makes the driver wait ~30 s for the operating system to give up,
+# freezing the answer; this way the assistant says so within REACH_TIMEOUT_SECONDS.
+REACH_TIMEOUT_SECONDS = 5
+UNREACHABLE_PAUSE_SECONDS = 30   # after a failure, don't keep everyone waiting on retries
+_unreachable_until = 0.0
 
 
 class ERPNotConfigured(Exception):
     """The ERP_DB_* settings aren't filled in."""
+
+
+class ERPUnreachable(Exception):
+    """The ERP server didn't answer (network, firewall or server down)."""
+
+
+def check_reachable(cfg):
+    """Raise ERPUnreachable quickly if nothing answers at the ERP server's address."""
+    global _unreachable_until
+    host, port = cfg["ERP_DB_HOST"], int(cfg.get("ERP_DB_PORT") or 1433)
+    if time.monotonic() < _unreachable_until:
+        raise ERPUnreachable(f"The ERP server at {host}:{port} didn't answer moments ago")
+    try:
+        with socket.create_connection((host, port), timeout=REACH_TIMEOUT_SECONDS):
+            pass
+    except OSError as exc:
+        _unreachable_until = time.monotonic() + UNREACHABLE_PAUSE_SECONDS
+        raise ERPUnreachable(f"The ERP server at {host}:{port} didn't answer "
+                             f"within {REACH_TIMEOUT_SECONDS} s ({exc})") from exc
 
 
 class UnsafeQuery(Exception):
@@ -103,28 +133,38 @@ def _engine():
     cfg = current_app.config
     driver = choose_driver(cfg)
     key = (driver, connection_string(cfg))
-    engine = _engines.get(key)
-    if engine is None:
-        import sqlalchemy as sa
-        common = dict(
-            pool_pre_ping=True, pool_size=3, max_overflow=2, pool_recycle=1800,
-            # Don't wait for (or hold) row locks: NAV users posting documents must never
-            # be slowed by the assistant, and lookups mustn't hang behind their locks.
-            # The trade-off: a lookup can see a change that's still being saved.
-            isolation_level="READ UNCOMMITTED")
-        if driver == "pyodbc":
-            engine = sa.create_engine(
-                "mssql+pyodbc:///?odbc_connect=" + urllib.parse.quote_plus(key[1]), **common)
+    with _engines_lock:   # two parallel lookups mustn't both build a pool
+        return _engines.get(key) or _build_engine(cfg, driver, key)
 
-            @sa.event.listens_for(engine, "connect")
-            def _set_timeout(dbapi_conn, _record):
-                dbapi_conn.timeout = QUERY_TIMEOUT_SECONDS   # pyodbc: per-query timeout
-        else:
-            engine = sa.create_engine(
-                _pymssql_url(cfg), **common,
-                connect_args={"login_timeout": 10, "timeout": QUERY_TIMEOUT_SECONDS,
-                              "appname": "AI in Ideal (read-only)"})
-        _engines[key] = engine
+
+def _build_engine(cfg, driver, key):
+    import sqlalchemy as sa
+    reach = {"ERP_DB_HOST": cfg["ERP_DB_HOST"], "ERP_DB_PORT": cfg.get("ERP_DB_PORT")}
+    common = dict(
+        # No ping before each query: on a slow link it costs a full round trip per
+        # lookup. A connection that died anyway is retried once in query().
+        pool_pre_ping=False, pool_size=3, max_overflow=2, pool_recycle=3600,
+        # Don't wait for (or hold) row locks: NAV users posting documents must never
+        # be slowed by the assistant, and lookups mustn't hang behind their locks.
+        # The trade-off: a lookup can see a change that's still being saved.
+        isolation_level="READ UNCOMMITTED")
+    if driver == "pyodbc":
+        engine = sa.create_engine(
+            "mssql+pyodbc:///?odbc_connect=" + urllib.parse.quote_plus(key[1]), **common)
+
+        @sa.event.listens_for(engine, "connect")
+        def _set_timeout(dbapi_conn, _record):
+            dbapi_conn.timeout = QUERY_TIMEOUT_SECONDS   # pyodbc: per-query timeout
+    else:
+        engine = sa.create_engine(
+            _pymssql_url(cfg), **common,
+            connect_args={"login_timeout": 10, "timeout": QUERY_TIMEOUT_SECONDS,
+                          "appname": "AI in Ideal (read-only)"})
+
+    @sa.event.listens_for(engine, "do_connect")
+    def _fail_fast(_dialect, _record, _cargs, _cparams):
+        check_reachable(reach)   # only for new connections, so no cost per query
+    _engines[key] = engine
     return engine
 
 
@@ -153,13 +193,30 @@ def read_only_connection():
         conn.close()
 
 
+def warm_pool(connections=2):
+    """Open connections ahead of time (logging in can take seconds on a slow link), so
+    the lookups for a question, which run side by side, find them ready."""
+    from concurrent.futures import ThreadPoolExecutor
+    engine = _engine()
+    with ThreadPoolExecutor(connections) as pool:
+        conns = list(pool.map(lambda _: engine.connect(), range(connections)))
+    for c in conns:
+        c.close()   # back into the pool, still logged in
+
+
 def query(sql, params=None, limit=MAX_ROWS):
     """Run one SELECT and return up to `limit` rows as dicts."""
     import sqlalchemy as sa
     check_read_only(sql)
-    with read_only_connection() as conn:
-        result = conn.execute(sa.text(sql), params or {})
-        return [dict(r) for r in result.mappings().fetchmany(min(limit, MAX_ROWS))]
+    for attempt in (1, 2):
+        try:
+            with read_only_connection() as conn:
+                result = conn.execute(sa.text(sql), params or {})
+                return [dict(r) for r in result.mappings().fetchmany(min(limit, MAX_ROWS))]
+        except sa.exc.DBAPIError as exc:
+            # A pooled connection the server dropped (idle, restart): try a fresh one once.
+            if attempt == 2 or not exc.connection_invalidated:
+                raise
 
 
 # ------------------------------------------------------------ NAV naming

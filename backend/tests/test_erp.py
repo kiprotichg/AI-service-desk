@@ -136,3 +136,56 @@ def test_startup_check_logs_success_and_failure(app, fake_erp, caplog, monkeypat
     assert erp_startup_check(app) is False
     assert "ERP check FAILED" in caplog.text and "Adaptive Server is unavailable" in caplog.text
     assert "p;ss{word}" not in caplog.text          # the password is never logged
+
+
+def _closed_port():
+    import socket as s
+    with s.socket() as sock:        # bind then release: nothing listens there now
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+@pytest.fixture
+def fresh_pools(monkeypatch):
+    monkeypatch.setattr(erp, "_engines", {})
+    monkeypatch.setattr(erp, "_unreachable_until", 0.0)
+
+
+def test_unreachable_server_fails_fast_then_pauses(fresh_pools, monkeypatch):
+    import time
+    cfg = {"ERP_DB_HOST": "127.0.0.1", "ERP_DB_PORT": str(_closed_port())}
+    t = time.perf_counter()
+    with pytest.raises(erp.ERPUnreachable, match="didn't answer within"):
+        erp.check_reachable(cfg)
+    assert time.perf_counter() - t < erp.REACH_TIMEOUT_SECONDS + 1
+    # For the next 30 s nobody waits on it again.
+    tried = []
+    monkeypatch.setattr(erp.socket, "create_connection", lambda *a, **k: tried.append(a))
+    with pytest.raises(erp.ERPUnreachable, match="moments ago"):
+        erp.check_reachable(cfg)
+    assert tried == []
+
+
+def test_new_connections_check_the_server_first(app, fresh_pools):
+    """A real pymssql pool: the check runs before the driver's own slow connect."""
+    pytest.importorskip("pymssql")
+    import time
+    app.config.update(SETTINGS, ERP_DB_HOST="127.0.0.1", ERP_DB_PORT=str(_closed_port()),
+                      ERP_DRIVER="pymssql")
+    with app.app_context():
+        t = time.perf_counter()
+        with pytest.raises(Exception) as err:
+            erp.query("SELECT 1 AS ok")
+    assert "didn't answer" in str(err.value) and time.perf_counter() - t < erp.REACH_TIMEOUT_SECONDS + 2
+
+
+def test_parallel_lookups_share_one_pool(app, fresh_pools):
+    pytest.importorskip("pymssql")
+    from concurrent.futures import ThreadPoolExecutor
+    app.config.update(SETTINGS, ERP_DRIVER="pymssql")
+
+    def build(_):
+        with app.app_context():
+            return id(erp._engine())
+    with ThreadPoolExecutor(8) as pool:
+        assert len(set(pool.map(build, range(8)))) == 1

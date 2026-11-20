@@ -154,6 +154,7 @@ def erp_startup_check(app):
         try:
             erp.query("SELECT 1 AS ok")
             log.warning("ERP check: connected to %s using %s.", where, driver)
+            erp.warm_pool()   # so the first questions don't wait for logins
             return True
         except Exception as exc:   # report it, never crash the app
             reason = " ".join(str(exc).split())[:400].replace(cfg["ERP_DB_PASSWORD"], "***")
