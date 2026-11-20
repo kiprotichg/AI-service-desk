@@ -9,10 +9,7 @@ Who may use them: users whose email domain is in ERP_ALLOWED_EMAIL_DOMAINS.
 """
 import datetime as dt
 import decimal
-import json
 import logging
-import re
-from concurrent.futures import ThreadPoolExecutor
 
 from flask import current_app
 
@@ -81,19 +78,6 @@ def _t(table):
     return erp.company_table(table)
 
 
-def _side_by_side(*queries):
-    """Run several (sql, params) queries at the same time; results in the same order.
-    On a slow link each query costs a full round trip, so two in parallel halve the wait."""
-    app = current_app._get_current_object()
-
-    def run(q):
-        with app.app_context():
-            return erp.query(*q)
-
-    with ThreadPoolExecutor(max_workers=len(queries)) as pool:
-        return list(pool.map(run, queries))
-
-
 # ------------------------------------------------------------------ lookups
 def find_customers(query):
     """Customers whose number or name contains the text."""
@@ -116,17 +100,18 @@ def customer_services(customer_no, group=""):
     """A customer's service items (guard posts, alarms, cash in transit...) and totals by group."""
     params = {"cust": (customer_no or "").strip().upper(), "group": (group or "").strip().upper()}
     group_filter = "AND (:group = '' OR i.[Service Item Group Code] = :group)"
-    items, totals = _side_by_side(
-        (f"SELECT TOP 40 i.[No_] AS number, i.[Description] AS description, "
+    items = erp.query(
+        f"SELECT TOP 40 i.[No_] AS number, i.[Description] AS description, "
         f"i.[Service Item Group Code] AS group_code, g.[Description] AS group_name, i.[Status] AS status, "
         f"i.[Response Time (Hours)] AS response_time_hours, i.[Last Service Date] AS last_service_date, "
         f"i.[Installation Date] AS installation_date, i.[Warranty Ending Date (Labor)] AS warranty_ends "
         f"FROM {_t('Service Item')} i LEFT JOIN {_t('Service Item Group')} g ON g.[Code] = i.[Service Item Group Code] "
-        f"WHERE i.[Customer No_] = :cust {group_filter} ORDER BY i.[No_]", params),
-        (f"SELECT i.[Service Item Group Code] AS group_code, MAX(g.[Description]) AS group_name, COUNT(*) AS items "
+        f"WHERE i.[Customer No_] = :cust {group_filter} ORDER BY i.[No_]", params)
+    totals = erp.query(
+        f"SELECT i.[Service Item Group Code] AS group_code, MAX(g.[Description]) AS group_name, COUNT(*) AS items "
         f"FROM {_t('Service Item')} i LEFT JOIN {_t('Service Item Group')} g ON g.[Code] = i.[Service Item Group Code] "
         f"WHERE i.[Customer No_] = :cust {group_filter} GROUP BY i.[Service Item Group Code] ORDER BY items DESC",
-        params))
+        params)
     out = _rows(items)
     for r in out:
         r["status"] = ITEM_STATUS.get(r["status"], r["status"])
@@ -268,79 +253,6 @@ def run_lookup(name, args):
     except Exception as exc:   # network, timeout, permissions: tell the model, don't crash
         log.exception("ERP lookup %s failed", name)
         return {"error": f"The ERP database couldn't be reached right now ({type(exc).__name__})."}
-
-
-# ------------------------------------------------- answering in one AI call
-# Numbers in this company look like C00309 (customer), SIT1175 (service item) and
-# SC01008 (contract). When a question names one, the lookups run before the AI is
-# asked, so it can answer straight away instead of first asking for the data.
-_CUSTOMER_NO = re.compile(r"\bC\d{5}\b", re.I)
-_ITEM_NO = re.compile(r"\bSIT\d{4}\b", re.I)
-_CONTRACT_NO = re.compile(r"\bSC\d{5}\b", re.I)
-_ABOUT_SERVICES = re.compile(r"servic|item|guard|alarm|post|\bcit\b|cash|how many|list|what does", re.I)
-MAX_PREFETCH = 4
-
-
-def _unique(matches, limit=2):
-    out = []
-    for m in matches:
-        if m.upper() not in out:
-            out.append(m.upper())
-    return out[:limit]
-
-
-def planned_lookups(text):
-    """The lookups a question obviously needs, from the numbers in it."""
-    text = text or ""
-    calls = []
-    for no in _unique(_CUSTOMER_NO.findall(text)):
-        calls.append(("find_customers", {"query": no}))
-        if _ABOUT_SERVICES.search(text):
-            calls.append(("customer_services", {"customer_no": no}))
-    calls += [("service_item", {"number_or_text": no}) for no in _unique(_ITEM_NO.findall(text))]
-    calls += [("find_contracts", {"query": no}) for no in _unique(_CONTRACT_NO.findall(text))]
-    return calls[:MAX_PREFETCH]
-
-
-def prefetch(text):
-    """Run the obvious lookups side by side. Returns [(name, args, result)]."""
-    calls = planned_lookups(text)
-    if not calls:
-        return []
-    app = current_app._get_current_object()
-
-    def run(call):
-        with app.app_context():
-            return run_lookup(*call)
-
-    with ThreadPoolExecutor(max_workers=len(calls)) as pool:
-        results = list(pool.map(run, calls))
-    return [(name, args, result) for (name, args), result in zip(calls, results)]
-
-
-def compact(value):
-    """Drop empty values (None, "", [], {}), so the AI reads less and answers sooner."""
-    if isinstance(value, dict):
-        out = {k: compact(v) for k, v in value.items()}
-        return {k: v for k, v in out.items() if v not in (None, "", [], {})}
-    if isinstance(value, list):
-        return [compact(v) for v in value]
-    return value
-
-
-def as_context(prefetched):
-    """The prefetched results, as compact text for the AI."""
-    blocks = []
-    for name, args, result in prefetched:
-        result = compact(result)
-        if name == "customer_services":   # group names are already in by_group
-            for item in result.get("items", []):
-                item.pop("group_name", None)
-        blocks.append({"lookup": name, "arguments": args, "result": result})
-    return ("<erp_data>\nLive ERP lookups already run for this message (use them; only "
-            "call a lookup for anything they don't cover):\n"
-            + json.dumps(blocks, default=str, ensure_ascii=False, separators=(",", ":"))
-            + "\n</erp_data>\n\n")
 
 
 def instructions(app=None):

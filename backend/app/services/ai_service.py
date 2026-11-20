@@ -324,31 +324,19 @@ def stream_reply(history, user_message, attachments=(), mode="service", web_sear
     try_search = web_search and time.monotonic() >= _search_off_until
     lookups = erp_lookups and _uses_erp(mode)
     system = PROMPTS[mode] + (erp_tools.instructions() if lookups else "") + STREAM_FORMAT
-    # One "Answer timing" line per answer in the log shows where any waiting went.
-    started_at = time.monotonic()
-    timing = {"ai_calls": 0, "lookup_s": 0.0, "lookups": 0, "model": "", "first_words": None}
-    # Numbers like C00309 in the question: fetch their data now, so one AI call is enough.
-    prefetched = erp_tools.prefetch(user_message) if lookups else []
-    timing["prefetch_s"] = time.monotonic() - started_at
-    erp_context = erp_tools.as_context(prefetched) if prefetched else ""
-    found = [name for name, _args, result in prefetched if "error" not in result]
     for search in ([True, False] if try_search else [False]):
         started = False
         try:
-            turn = erp_context + _user_turn(user_message, faqs, attachments, mode, search)
+            turn = _user_turn(user_message, faqs, attachments, mode, search)
             for kind, value in _gemini_stream(history, turn, attachments, system, search,
-                                              mode, user_message, lookups=lookups,
-                                              already_used=found, timing=timing):
+                                              mode, user_message, lookups=lookups):
                 if kind == "delta":
                     started = True
-                    if timing["first_words"] is None:
-                        timing["first_words"] = time.monotonic() - started_at
                     yield ("delta", value)
                 else:
                     reply = value
             if web_search and not search:
                 reply.notice = WEB_SEARCH_UNAVAILABLE
-            _log_timing(timing, started_at, mode, len(prefetched))
             yield ("done", _finish(reply, user_message, mode))
             return
         except Exception as exc:
@@ -486,17 +474,8 @@ def _lookup_responses(calls, used):
     return parts
 
 
-def _log_timing(t, started_at, mode, prefetched):
-    log.warning(
-        "Answer timing: mode=%s prefetched_lookups=%d (%.1fs) ai_calls=%d "
-        "lookups_during_answer=%d (%.1fs) first_words=%s total=%.1fs model=%s",
-        mode, prefetched, t.get("prefetch_s", 0.0), t["ai_calls"], t["lookups"], t["lookup_s"],
-        f"{t['first_words']:.1f}s" if t["first_words"] is not None else "-",
-        time.monotonic() - started_at, t["model"] or "-")
-
-
 def _gemini_stream(history, user_turn, attachments, system, web_search, mode, user_message,
-                   lookups=False, already_used=(), timing=None):
+                   lookups=False):
     """Yield ("delta", text)... then ("reply", AIReply). Tries the fallback model if the
     main one is overloaded before it has written anything.
 
@@ -508,16 +487,13 @@ def _gemini_stream(history, user_turn, attachments, system, web_search, mode, us
     contents = _gemini_contents(history, user_turn, attachments)
     models = _gemini_models()
     for i, model in enumerate(models):
-        splitter, sources, started, used = _MetaSplitter(), [], False, list(already_used)
+        splitter, sources, started, used = _MetaSplitter(), [], False, []
         convo = list(contents)
         try:
             for round_no in range(MAX_LOOKUP_ROUNDS + 1):
                 config = _gemini_config(system, web_search, lookups=lookups,
                                         allow_calls=round_no < MAX_LOOKUP_ROUNDS)
                 calls, model_parts = [], []
-                if timing is not None:
-                    timing["ai_calls"] += 1
-                    timing["model"] = model
                 for chunk in _get_gemini_client().models.generate_content_stream(
                         model=model, contents=convo, config=config):
                     parts = _chunk_parts(chunk)
@@ -535,13 +511,8 @@ def _gemini_stream(history, user_turn, attachments, system, web_search, mode, us
                 if not calls or started or not lookups:
                     break
                 # Keep the model's own parts (they carry its thought signatures) and add the results.
-                looked_up_at = time.monotonic()
-                answers = _lookup_responses(calls, used)
-                if timing is not None:
-                    timing["lookups"] += len(calls)
-                    timing["lookup_s"] += time.monotonic() - looked_up_at
                 convo += [types.Content(role="model", parts=model_parts),
-                          types.Content(role="user", parts=answers)]
+                          types.Content(role="user", parts=_lookup_responses(calls, used))]
         except Exception as exc:
             if (started or i == len(models) - 1 or not _is_overloaded(exc)
                     or (web_search and _is_quota_error(exc))):   # search quota covers every model
@@ -744,13 +715,6 @@ def _get_gemini_client():
         _gemini_client = genai.Client(  # reads GEMINI_API_KEY (or GOOGLE_API_KEY)
             http_options=types.HttpOptions(retry_options=retry))
     return _gemini_client
-
-
-def warm_up():
-    """Open the connection to Gemini ahead of the first question (saves ~0.5 s on it)."""
-    cfg = current_app.config
-    if cfg["AI_ENABLED"] and cfg["AI_PROVIDER"] == "gemini":
-        _get_gemini_client().models.get(model=cfg["GEMINI_MODEL"])
 
 
 def _gemini_parts(text, parts):
