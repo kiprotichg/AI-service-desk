@@ -324,12 +324,17 @@ def stream_reply(history, user_message, attachments=(), mode="service", web_sear
     try_search = web_search and time.monotonic() >= _search_off_until
     lookups = erp_lookups and _uses_erp(mode)
     system = PROMPTS[mode] + (erp_tools.instructions() if lookups else "") + STREAM_FORMAT
+    # Numbers like C00309 in the question: fetch their data now, so one AI call is enough.
+    prefetched = erp_tools.prefetch(user_message) if lookups else []
+    erp_context = erp_tools.as_context(prefetched) if prefetched else ""
+    found = [name for name, _args, result in prefetched if "error" not in result]
     for search in ([True, False] if try_search else [False]):
         started = False
         try:
-            turn = _user_turn(user_message, faqs, attachments, mode, search)
+            turn = erp_context + _user_turn(user_message, faqs, attachments, mode, search)
             for kind, value in _gemini_stream(history, turn, attachments, system, search,
-                                              mode, user_message, lookups=lookups):
+                                              mode, user_message, lookups=lookups,
+                                              already_used=found):
                 if kind == "delta":
                     started = True
                     yield ("delta", value)
@@ -475,7 +480,7 @@ def _lookup_responses(calls, used):
 
 
 def _gemini_stream(history, user_turn, attachments, system, web_search, mode, user_message,
-                   lookups=False):
+                   lookups=False, already_used=()):
     """Yield ("delta", text)... then ("reply", AIReply). Tries the fallback model if the
     main one is overloaded before it has written anything.
 
@@ -487,7 +492,7 @@ def _gemini_stream(history, user_turn, attachments, system, web_search, mode, us
     contents = _gemini_contents(history, user_turn, attachments)
     models = _gemini_models()
     for i, model in enumerate(models):
-        splitter, sources, started, used = _MetaSplitter(), [], False, []
+        splitter, sources, started, used = _MetaSplitter(), [], False, list(already_used)
         convo = list(contents)
         try:
             for round_no in range(MAX_LOOKUP_ROUNDS + 1):

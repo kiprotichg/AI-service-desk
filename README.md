@@ -544,8 +544,18 @@ like Render. `ERP_DRIVER=pyodbc` or `ERP_DRIVER=pymssql` forces one; the default
   change data.
 - `python -m flask --app run erp-tables [--columns Service]` lists the company's tables.
 
-**Speed:** answers that use a lookup take a few seconds longer, about 5–10 s. Gemini
-asks for the data, the lookup itself takes about 0.1 s, then Gemini writes the answer.
+**Speed:**
+- **Questions that name a number** (customer `C00309`, service item `SIT1175`, contract
+  `SC01008`) have their lookups run first, side by side, so Gemini answers in one call:
+  about 2–3 s instead of 3–5 s.
+- **Other ERP questions** need two Gemini calls: one to ask for the data, one to answer.
+- **Gunicorn:** `backend/gunicorn.conf.py` makes gunicorn (as on Render) use 8 threads
+  with a 120 s timeout. The defaults (one request at a time, killed after 30 s) cut off
+  slow answers.
+- **Render free plan:** the service sleeps after about 15 minutes idle, and the next
+  request waits up to about 50 s. A free uptime monitor (for example UptimeRobot) that
+  opens `https://<your-service>.onrender.com/api/health` every 10 minutes keeps it
+  awake; a paid instance never sleeps.
 
 ### Response speed
 

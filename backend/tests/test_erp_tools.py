@@ -216,3 +216,55 @@ def test_failed_lookup_gets_no_live_data_note(app, client, monkeypatch):
     done = [json.loads(line) for line in res.get_data(as_text=True).splitlines()][-1]
     assert len(fake.calls) == 2                 # the model still got the error and answered
     assert done["reply"]["erp_note"] == ""      # ...but without claiming live ERP data
+
+
+# --------------------------------------------- one AI call for obvious numbers
+@pytest.mark.parametrize("text,expected", [
+    ("Who is customer C00309?", [("find_customers", {"query": "C00309"})]),
+    ("What services does c00309 have?", [("find_customers", {"query": "C00309"}),
+                                         ("customer_services", {"customer_no": "C00309"})]),
+    ("Show service item sit1175", [("service_item", {"number_or_text": "SIT1175"})]),
+    ("When is SC01008 invoiced?", [("find_contracts", {"query": "SC01008"})]),
+    ("How do I log a service request?", []),
+    ("Order C0030912 and XC00309", []),      # not a whole customer number
+])
+def test_planned_lookups(text, expected):
+    assert erp_tools.planned_lookups(text) == expected
+
+
+class OneCallGemini:
+    """Answers straight away (no lookup requests)."""
+    def __init__(self):
+        self.calls = []
+        self.models = SimpleNamespace(generate_content_stream=self._stream)
+
+    def _stream(self, **kw):
+        self.calls.append(kw)
+        part = SimpleNamespace(function_call=None, thought=False,
+                               text='C00309 has 265 services.\n<meta>{"intent": "service_request"}</meta>')
+        return iter([SimpleNamespace(text=part.text, candidates=[SimpleNamespace(content=SimpleNamespace(parts=[part]))])])
+
+
+def test_numbers_in_the_question_are_looked_up_first(app, client, monkeypatch):
+    _, looked_up, conv = _setup(app, monkeypatch, client, "jane@idealdynamics.co.ke")
+    fake = OneCallGemini()
+    monkeypatch.setattr(ai_service, "_get_gemini_client", lambda: fake)
+    res = client.post(f"/api/conversations/{conv['id']}/messages?stream=1",
+                      headers={"X-Conversation-Token": conv["token"]},
+                      json={"content": "What services does C00309 have?", "mode": "service"})
+    done = [json.loads(line) for line in res.get_data(as_text=True).splitlines()][-1]
+    assert sorted(name for name, _ in looked_up) == ["customer_services", "find_customers"]
+    assert len(fake.calls) == 1                              # one AI call, not two
+    sent = str(fake.calls[0]["contents"][-1])
+    assert "<erp_data>" in sent and "C00309" in sent
+    assert "IDEALDYNAMICS_PROP" in done["reply"]["erp_note"]
+
+
+def test_no_prefetch_for_users_without_erp_access(app, client, monkeypatch):
+    _, looked_up, conv = _setup(app, monkeypatch, client, "eve@gmail.com")
+    fake = OneCallGemini()
+    monkeypatch.setattr(ai_service, "_get_gemini_client", lambda: fake)
+    client.post(f"/api/conversations/{conv['id']}/messages?stream=1",
+                headers={"X-Conversation-Token": conv["token"]},
+                json={"content": "What services does C00309 have?", "mode": "service"}).get_data()
+    assert looked_up == [] and "<erp_data>" not in str(fake.calls[0]["contents"][-1])
