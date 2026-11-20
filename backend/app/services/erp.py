@@ -193,7 +193,7 @@ def read_only_connection():
         conn.close()
 
 
-def warm_pool(connections=2):
+def warm_pool(connections=3):
     """Open connections ahead of time (logging in can take seconds on a slow link), so
     the lookups for a question, which run side by side, find them ready."""
     from concurrent.futures import ThreadPoolExecutor

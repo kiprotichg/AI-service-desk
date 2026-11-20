@@ -35,14 +35,17 @@ def client(app):
 def fake_query(app, monkeypatch):
     """erp.query stand-in: records SQL and params, returns rows queued per call."""
     app.config.update(ERP)
-    calls, queue = [], []
+    calls, queue, routes = [], [], []
 
     def query(sql, params=None, limit=200):
         erp.check_read_only(sql)          # the real safety check still applies
         calls.append((sql, params or {}))
+        for text, rows in routes:         # answers chosen by the SQL (for parallel queries)
+            if text in sql:
+                return rows
         return queue.pop(0) if queue else []
     monkeypatch.setattr(erp, "query", query)
-    return SimpleNamespace(calls=calls, queue=queue)
+    return SimpleNamespace(calls=calls, queue=queue, routes=routes)
 
 
 # -------------------------------------------------------------------- access
@@ -80,13 +83,13 @@ def test_find_customers_labels_and_escapes(app, fake_query):
 
 
 def test_customer_services_dates_and_totals(app, fake_query):
-    fake_query.queue += [
-        [{"number": "SI01", "description": "Night Guard-Kisumu ATM", "group_code": "GDS",
+    fake_query.routes += [
+        ("TOP 40", [{"number": "SI01", "description": "Night Guard-Kisumu ATM", "group_code": "GDS",
           "group_name": "Regular Guards", "status": 2, "response_time_hours": decimal.Decimal("4"),
           "last_service_date": dt.datetime(1753, 1, 1), "installation_date": dt.datetime(2026, 3, 1),
-          "warranty_ends": dt.datetime(1753, 1, 1)}],
-        [{"group_code": "GDS", "group_name": "Regular Guards", "items": 264},
-         {"group_code": "ALM", "group_name": "Alarms Services", "items": 1}],
+          "warranty_ends": dt.datetime(1753, 1, 1)}]),
+        ("GROUP BY", [{"group_code": "GDS", "group_name": "Regular Guards", "items": 264},
+                      {"group_code": "ALM", "group_name": "Alarms Services", "items": 1}]),
     ]
     with app.app_context():
         r = erp_tools.customer_services("c00309")
@@ -268,3 +271,13 @@ def test_no_prefetch_for_users_without_erp_access(app, client, monkeypatch):
                 headers={"X-Conversation-Token": conv["token"]},
                 json={"content": "What services does C00309 have?", "mode": "service"}).get_data()
     assert looked_up == [] and "<erp_data>" not in str(fake.calls[0]["contents"][-1])
+
+
+def test_every_answer_logs_its_timing(app, client, monkeypatch, caplog):
+    _, _, conv = _setup(app, monkeypatch, client, "jane@idealdynamics.co.ke")
+    monkeypatch.setattr(ai_service, "_get_gemini_client", lambda: OneCallGemini())
+    client.post(f"/api/conversations/{conv['id']}/messages?stream=1",
+                headers={"X-Conversation-Token": conv["token"]},
+                json={"content": "What services does C00309 have?", "mode": "service"}).get_data()
+    line = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("Answer timing"))
+    assert "prefetched_lookups=2" in line and "ai_calls=1" in line and "first_words=" in line

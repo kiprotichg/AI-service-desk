@@ -134,10 +134,21 @@ def create_app(config_class=Config):
         seed_agent(app.config["AGENT_USERNAME"], app.config["AGENT_PASSWORD"])
 
     from .services import erp
-    if erp.erp_enabled(app) and not app.config.get("TESTING"):
-        # In the background, so a slow or blocked ERP server never delays startup.
-        threading.Thread(target=erp_startup_check, args=(app,), daemon=True).start()
+    if not app.config.get("TESTING"):
+        # In the background, so a slow AI or ERP server never delays startup.
+        threading.Thread(target=_warm_up_ai, args=(app,), daemon=True).start()
+        if erp.erp_enabled(app):
+            threading.Thread(target=erp_startup_check, args=(app,), daemon=True).start()
     return app
+
+
+def _warm_up_ai(app):
+    from .services import ai_service
+    with app.app_context():
+        try:
+            ai_service.warm_up()
+        except Exception as exc:   # only an optimisation; never crash the app
+            log.warning("AI warm-up skipped: %s", exc)
 
 
 def erp_startup_check(app):

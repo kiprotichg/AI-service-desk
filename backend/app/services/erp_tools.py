@@ -81,6 +81,19 @@ def _t(table):
     return erp.company_table(table)
 
 
+def _side_by_side(*queries):
+    """Run several (sql, params) queries at the same time; results in the same order.
+    On a slow link each query costs a full round trip, so two in parallel halve the wait."""
+    app = current_app._get_current_object()
+
+    def run(q):
+        with app.app_context():
+            return erp.query(*q)
+
+    with ThreadPoolExecutor(max_workers=len(queries)) as pool:
+        return list(pool.map(run, queries))
+
+
 # ------------------------------------------------------------------ lookups
 def find_customers(query):
     """Customers whose number or name contains the text."""
@@ -103,18 +116,17 @@ def customer_services(customer_no, group=""):
     """A customer's service items (guard posts, alarms, cash in transit...) and totals by group."""
     params = {"cust": (customer_no or "").strip().upper(), "group": (group or "").strip().upper()}
     group_filter = "AND (:group = '' OR i.[Service Item Group Code] = :group)"
-    items = erp.query(
-        f"SELECT TOP 40 i.[No_] AS number, i.[Description] AS description, "
+    items, totals = _side_by_side(
+        (f"SELECT TOP 40 i.[No_] AS number, i.[Description] AS description, "
         f"i.[Service Item Group Code] AS group_code, g.[Description] AS group_name, i.[Status] AS status, "
         f"i.[Response Time (Hours)] AS response_time_hours, i.[Last Service Date] AS last_service_date, "
         f"i.[Installation Date] AS installation_date, i.[Warranty Ending Date (Labor)] AS warranty_ends "
         f"FROM {_t('Service Item')} i LEFT JOIN {_t('Service Item Group')} g ON g.[Code] = i.[Service Item Group Code] "
-        f"WHERE i.[Customer No_] = :cust {group_filter} ORDER BY i.[No_]", params)
-    totals = erp.query(
-        f"SELECT i.[Service Item Group Code] AS group_code, MAX(g.[Description]) AS group_name, COUNT(*) AS items "
+        f"WHERE i.[Customer No_] = :cust {group_filter} ORDER BY i.[No_]", params),
+        (f"SELECT i.[Service Item Group Code] AS group_code, MAX(g.[Description]) AS group_name, COUNT(*) AS items "
         f"FROM {_t('Service Item')} i LEFT JOIN {_t('Service Item Group')} g ON g.[Code] = i.[Service Item Group Code] "
         f"WHERE i.[Customer No_] = :cust {group_filter} GROUP BY i.[Service Item Group Code] ORDER BY items DESC",
-        params)
+        params))
     out = _rows(items)
     for r in out:
         r["status"] = ITEM_STATUS.get(r["status"], r["status"])
@@ -306,13 +318,29 @@ def prefetch(text):
     return [(name, args, result) for (name, args), result in zip(calls, results)]
 
 
+def compact(value):
+    """Drop empty values (None, "", [], {}), so the AI reads less and answers sooner."""
+    if isinstance(value, dict):
+        out = {k: compact(v) for k, v in value.items()}
+        return {k: v for k, v in out.items() if v not in (None, "", [], {})}
+    if isinstance(value, list):
+        return [compact(v) for v in value]
+    return value
+
+
 def as_context(prefetched):
-    """The prefetched results, as text for the AI."""
-    blocks = [{"lookup": name, "arguments": args, "result": result}
-              for name, args, result in prefetched]
+    """The prefetched results, as compact text for the AI."""
+    blocks = []
+    for name, args, result in prefetched:
+        result = compact(result)
+        if name == "customer_services":   # group names are already in by_group
+            for item in result.get("items", []):
+                item.pop("group_name", None)
+        blocks.append({"lookup": name, "arguments": args, "result": result})
     return ("<erp_data>\nLive ERP lookups already run for this message (use them; only "
             "call a lookup for anything they don't cover):\n"
-            + json.dumps(blocks, default=str, ensure_ascii=False) + "\n</erp_data>\n\n")
+            + json.dumps(blocks, default=str, ensure_ascii=False, separators=(",", ":"))
+            + "\n</erp_data>\n\n")
 
 
 def instructions(app=None):
