@@ -108,12 +108,19 @@ def test_service_item_with_history(app, fake_query):
 
 
 def test_lookups_never_touch_hr_or_payroll_tables(app, fake_query):
+    sql_by_lookup = {}
     with app.app_context():
         for name, (fn, _d, props, _r) in erp_tools.LOOKUPS.items():
+            before = len(fake_query.calls)
             fn(**{k: "x" for k in props})
-    all_sql = " ".join(sql for sql, _ in fake_query.calls)
-    for forbidden in ("$Employee", "$Payroll", "$Resource]", "Social Security", "National ID", "Phone"):
+            sql_by_lookup[name] = " ".join(sql for sql, _ in fake_query.calls[before:])
+    all_sql = " ".join(sql_by_lookup.values())
+    for forbidden in ("$Employee", "$Payroll", "$Resource]", "Social Security", "National ID"):
         assert forbidden not in all_sql
+    # The contract's own contact phone/email (asked for by the user) only in contract_details.
+    for name, sql in sql_by_lookup.items():
+        if name != "contract_details":
+            assert "Phone" not in sql and "E-Mail" not in sql, name
 
 
 def test_run_lookup_reports_problems(app, fake_query, monkeypatch):
@@ -295,7 +302,7 @@ def test_examples_and_guidance_reach_the_model(app):
 
 def test_every_lookup_is_declared_to_the_model():
     declared = {d.name for d in erp_tools.gemini_tool().function_declarations}
-    assert declared == set(erp_tools.LOOKUPS) and len(declared) == 14
+    assert declared == set(erp_tools.LOOKUPS) and len(declared) == 15
 
 
 def test_rank_customers_by_services_and_value(app, fake_query):
@@ -381,3 +388,31 @@ def test_contract_extra_fields(app, fake_query):
     sql = fake_query.calls[0][0]
     assert "$Salesperson_Purchaser]" in sql and "$Responsibility Center]" in sql
     assert c["service_period"] == "2Y (2 years)" and c["invoice_period"] == "quarterly"
+
+
+def test_contract_details_header_and_lines(app, fake_query):
+    fake_query.queue += [
+        [{"contract_no": "SC90001", "type": 1, "status": 1, "change_status": 1, "invoice_period": 0,
+          "prepaid": 1, "invoice_after_service": 0, "combine_invoices": 0, "contract_lines_on_invoice": 1,
+          "automatic_credit_memos": 0, "service_period": "1\x07", "contract_period": "",
+          "price_update_period": "1\x07", "phone": "", "email": None, "customer_name": "Test Ltd"}],
+        [{"line_no": 10000, "service_item_no": "SI1", "line_amount": decimal.Decimal("100.50"),
+          "service_period": "1\x05", "credited": 0, "serial_no": ""},
+         {"line_no": 20000, "service_item_no": "SI2", "line_amount": decimal.Decimal("50"), "credited": 1}],
+    ]
+    with app.app_context():
+        r = erp_tools.contract_details("sc90001")
+    head_sql, line_sql = fake_query.calls[0][0], fake_query.calls[1][0]
+    assert fake_query.calls[0][1]["key"] == "SC90001" and "[Phone No_]" in head_sql
+    assert "$Service Contract Line]" in line_sql
+    c = r["contract"]
+    assert c["change_status"] == "locked" and c["prepaid"] is True and c["invoice_period"] == "monthly"
+    assert c["service_period"] == "1Y (1 year)" and "phone" not in c and "email" not in c   # empties dropped
+    assert r["line_count"] == 2 and r["lines_total_amount"] == 150.5
+    assert r["lines"][0]["service_period"] == "1M (1 month)" and "serial_no" not in r["lines"][0]
+    json.dumps(r)
+
+
+def test_contract_details_not_found(app, fake_query):
+    with app.app_context():
+        assert erp_tools.contract_details("NOPE")["found"] is False

@@ -284,6 +284,104 @@ def contract_summary(show="active"):
             "note": f"Listing the first {len(out)} of {count}." if count > len(out) else ""}
 
 
+# Every business field of a contract header (technical ones like No. Series and
+# dimension set IDs are left out). (column, name in the answer)
+_CONTRACT_FIELDS = [
+    ("Contract No_", "contract_no"), ("Contract Type", "type"), ("Status", "status"),
+    ("Change Status", "change_status"), ("Description", "description"),
+    ("Description 2", "description_2"), ("Customer No_", "customer_no"),
+    ("Contact No_", "contact_no"), ("Contact Name", "contact_name"), ("Phone No_", "phone"),
+    ("E-Mail", "email"), ("Fax No_", "fax"), ("Your Reference", "your_reference"),
+    ("Bill-to Customer No_", "bill_to_customer_no"), ("Bill-to Contact No_", "bill_to_contact_no"),
+    ("Bill-to Contact", "bill_to_contact"), ("Ship-to Code", "ship_to_code"),
+    ("Salesperson Code", "salesperson_code"), ("Responsibility Center", "responsibility_center"),
+    ("Serv_ Contract Acc_ Gr_ Code", "contract_account_group"), ("Contract Group Code", "contract_group"),
+    ("Service Zone Code", "service_zone"), ("Service Order Type", "service_order_type"),
+    ("Currency Code", "currency"), ("Payment Terms Code", "payment_terms"),
+    ("Starting Date", "starting_date"), ("First Service Date", "first_service_date"),
+    ("Expiration Date", "expiration_date"), ("Accept Before", "accept_before"),
+    ("Suspension Date", "suspension_date"), ("Termination Date", "termination_date"),
+    ("Cancel Reason Code", "cancel_reason"), ("Invoice Period", "invoice_period"),
+    ("Last Invoice Date", "last_invoice_date"), ("Last Invoice Period End", "last_invoice_period_end"),
+    ("Next Invoice Date", "next_invoice_date"), ("Next Invoice Period Start", "next_period_start"),
+    ("Next Invoice Period End", "next_period_end"), ("Next Invoice Period", "next_invoice_period"),
+    ("Annual Amount", "annual_amount"), ("Amount per Period", "amount_per_period"),
+    ("Max_ Labor Unit Price", "max_labor_unit_price"), ("Prepaid", "prepaid"),
+    ("Invoice after Service", "invoice_after_service"), ("Combine Invoices", "combine_invoices"),
+    ("Contract Lines on Invoice", "contract_lines_on_invoice"),
+    ("Automatic Credit Memos", "automatic_credit_memos"), ("Response Time (Hours)", "response_time_hours"),
+    ("Service Period", "service_period"), ("Contract Period", "contract_period"),
+    ("Price Update Period", "price_update_period"), ("Last Price Update Date", "last_price_update_date"),
+    ("Next Price Update Date", "next_price_update_date"), ("Last Price Update _", "last_price_update_percent"),
+    ("Price Inv_ Increase Code", "price_increase_code"), ("Quote No_", "quote_no"),
+    ("Template No_", "template_no"), ("Probability", "probability"), ("Billing Status", "billing_status"),
+    ("Insurance Contract Type", "insurance_contract_type"),
+    ("Insurance Policy Number", "insurance_policy_number"), ("Property Type", "property_type"),
+    ("Shortcut Dimension 1 Code", "dimension_1"), ("Shortcut Dimension 2 Code", "dimension_2"),
+]
+_YES_NO_FIELDS = ("prepaid", "invoice_after_service", "combine_invoices", "contract_lines_on_invoice",
+                  "automatic_credit_memos")
+_DATE_FORMULA_FIELDS = ("service_period", "contract_period", "price_update_period")
+_CHANGE_STATUS = {0: "open", 1: "locked"}
+_LINE_FIELDS = [
+    ("Line No_", "line_no"), ("Service Item No_", "service_item_no"), ("Description", "description"),
+    ("Serial No_", "serial_no"), ("Service Item Group Code", "group_code"), ("Item No_", "item_no"),
+    ("Quantity", "quantity"), ("Unit of Measure Code", "unit"), ("Line Value", "line_value"),
+    ("Line Discount _", "discount_percent"), ("Line Discount Amount", "discount_amount"),
+    ("Line Amount", "line_amount"), ("Line Cost", "line_cost"), ("Profit", "profit"),
+    ("Starting Date", "starting_date"), ("Contract Expiration Date", "expiration_date"),
+    ("Service Period", "service_period"), ("Response Time (Hours)", "response_time_hours"),
+    ("Last Service Date", "last_service_date"), ("Last Planned Service Date", "last_planned_service_date"),
+    ("Next Planned Service Date", "next_planned_service_date"),
+    ("Last Preventive Maint_ Date", "last_preventive_maintenance_date"),
+    ("Invoiced to Date", "invoiced_to_date"), ("Credited", "credited"), ("Ship-to Code", "ship_to_code"),
+]
+
+
+def contract_details(contract_no):
+    """Everything about one contract: all header fields (customer, contact, billing,
+    dates, invoicing, prices, periods, cancellation) and its lines (the service items it
+    covers, with quantities, prices, discounts, profit and service dates)."""
+    key = (contract_no or "").strip().upper()
+    head_cols = ", ".join(f"h.[{col}] AS {name}" for col, name in _CONTRACT_FIELDS)
+    head = erp.query(
+        f"SELECT TOP 1 {head_cols}, c.[Name] AS customer_name, b.[Name] AS bill_to_customer_name, "
+        f"sp.[Name] AS salesperson_name, rc.[Name] AS responsibility_center_name "
+        f"FROM {_t('Service Contract Header')} h "
+        f"LEFT JOIN {_t('Customer')} c ON c.[No_] = h.[Customer No_] "
+        f"LEFT JOIN {_t('Customer')} b ON b.[No_] = h.[Bill-to Customer No_] "
+        f"LEFT JOIN {_t('Salesperson_Purchaser')} sp ON sp.[Code] = h.[Salesperson Code] "
+        f"LEFT JOIN {_t('Responsibility Center')} rc ON rc.[Code] = h.[Responsibility Center] "
+        f"WHERE h.[Contract No_] = :key ORDER BY h.[Contract Type] DESC", {"key": key})
+    if not head:
+        return {"contract_no": key, "found": False}
+    contract = _rows(head)[0]
+    contract["type"] = CONTRACT_TYPE.get(contract["type"], contract["type"])
+    contract["status"] = CONTRACT_STATUS.get(contract["status"], contract["status"])
+    contract["change_status"] = _CHANGE_STATUS.get(contract["change_status"], contract["change_status"])
+    contract["invoice_period"] = INVOICE_PERIOD.get(contract["invoice_period"], contract["invoice_period"])
+    for f in _YES_NO_FIELDS:
+        contract[f] = bool(contract[f])
+    for f in _DATE_FORMULA_FIELDS:
+        contract[f] = nav_date_formula(contract[f])
+    # Leave out empty fields so the answer stays readable.
+    contract = {k: v for k, v in contract.items() if v not in ("", None) or k in ("status", "type")}
+    line_cols = ", ".join(f"l.[{col}] AS {name}" for col, name in _LINE_FIELDS)
+    lines = erp.query(
+        f"SELECT TOP 100 {line_cols}, g.[Description] AS group_name "
+        f"FROM {_t('Service Contract Line')} l "
+        f"LEFT JOIN {_t('Service Item Group')} g ON g.[Code] = l.[Service Item Group Code] "
+        f"WHERE l.[Contract No_] = :key ORDER BY l.[Line No_]", {"key": key})
+    out_lines = []
+    for r in _rows(lines):
+        r["service_period"] = nav_date_formula(r.get("service_period"))
+        r["credited"] = bool(r.get("credited"))
+        out_lines.append({k: v for k, v in r.items() if v not in ("", None)})
+    total = sum(r.get("line_amount") or 0 for r in out_lines)
+    return {"found": True, "contract": contract, "lines": out_lines,
+            "line_count": len(out_lines), "lines_total_amount": round(total, 2)}
+
+
 def blocked_customers():
     """Customers that are blocked, and how many."""
     counted = erp.query(f"SELECT COUNT(*) AS n FROM {_t('Customer')} WHERE [Blocked] <> 0")
@@ -532,6 +630,15 @@ LOOKUPS = {
                                        "signed, not signed, cancelled, expiring, invoice due, "
                                        "invoice overdue, or all")},
                          []),
+    "contract_details": (contract_details, "Everything about ONE contract by its number: customer, "
+                         "contact (name, phone, email), bill-to customer, salesperson, dates (start, "
+                         "first service, expiry, suspension, termination, last and next invoice, price "
+                         "updates), invoicing (period, amount per period, annual amount, prepaid), "
+                         "cancel reason, periods, insurance and property fields, plus its LINES: the "
+                         "service items it covers with quantity, price, discount, line amount, cost, "
+                         "profit and service dates. Use for detailed questions about a contract.",
+                         {"contract_no": dict(_STR, description="Contract number, e.g. SC00123")},
+                         ["contract_no"]),
     "blocked_customers": (blocked_customers, "How many customers are blocked, and which ones.", {}, []),
     "rank_customers": (rank_customers, "Top customers ranked by number of service items (optionally "
                        "within one service group, e.g. alarms), by number of active contracts, or by "
@@ -579,6 +686,8 @@ EXAMPLE_QUESTIONS = [
     ("What services does C00123 have?", ["customer_services"]),
     ("Show service item SIT0001 and what changed on it", ["service_item"]),
     ("When is contract SC00123 next invoiced?", ["find_contracts"]),
+    ("Which service items does contract SC00123 cover, and at what price each?", ["contract_details"]),
+    ("Who is the contact for SC00123, and when was it last invoiced?", ["contract_details"]),
     # counts and totals
     ("How many alarm services do we have?", ["service_summary"]),
     ("How many active contracts do we have, and what are they worth a year?", ["contract_summary"]),
