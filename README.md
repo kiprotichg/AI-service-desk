@@ -511,6 +511,23 @@ refuses to run a lookup for them even if the model asks for one.
 | `service_summary` | Number of service items per group or status |
 | `find_contracts` | Service contracts: dates, next invoice date and period |
 | `blocked_customers` | Blocked customers and how many |
+| `contract_summary` | How many contracts are active (signed, started, not expired), signed, unsigned, expiring, due or overdue for invoicing, and the yearly value of active ones |
+| `rank_customers` | Top customers by service items (optionally in one group), active contracts or contract value |
+| `customer_breakdown` | Customers and service items per city, salesperson, payment terms, branch or blocked status |
+| `services_at_location` | Service items at a place or site (e.g. "Kisumu", "ATM"), per group and per customer |
+| `recent_service_changes` | What changed on service items in the last N days, optionally for one customer |
+| `customers_without_active_contract` | Customers with service items but no active contract (a follow-up list) |
+| `contract_trend` | Contracts started per month, how many signed, and their yearly value |
+| `data_quality` | Gaps in the data: items without a group or serial number, customers without a city, unsigned contracts |
+
+**Example questions** (`EXAMPLE_QUESTIONS` in `erp_tools.py`): about 25 questions, from
+simple ("Who is customer C00123?") to combined ("Do our top 3 customers all have active
+contracts?" uses `rank_customers` and then `find_contracts`). Each is paired with the
+lookups that answer it.
+- **The AI is shown this list,** so it picks the right lookups, calls several for harder
+  questions, and works out totals and percentages itself.
+- **Tests check** that every lookup named in the list exists.
+- **To teach it a new kind of question,** add a line to the list.
 
 **Kept out on purpose:** employees, payroll, resources (national ID and social security
 numbers) and contact phone numbers. IDEALDYNAMICS_PROP has no invoices or ledger entries,

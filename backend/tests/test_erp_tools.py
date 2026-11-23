@@ -275,3 +275,98 @@ def test_due_and_overdue_invoices_are_separate(app, fake_query):
     assert "[Next Invoice Date] >= CAST(GETDATE() AS date)" in due_sql       # not in the past
     assert "[Next Invoice Date] < CAST(GETDATE() AS date)" in overdue_sql    # only the past
     assert "invoices_overdue" in fake_query.calls[0][0]
+
+
+# ----------------------------------------------------- broader question types
+def test_every_example_question_names_real_lookups():
+    named = {n for _, names in erp_tools.EXAMPLE_QUESTIONS for n in names}
+    assert named <= set(erp_tools.LOOKUPS)
+    assert len(erp_tools.EXAMPLE_QUESTIONS) >= 20
+    assert any(len(names) > 1 for _, names in erp_tools.EXAMPLE_QUESTIONS)   # combined questions too
+
+
+def test_examples_and_guidance_reach_the_model(app):
+    app.config.update(ERP)
+    with app.app_context():
+        text = erp_tools.instructions()
+    assert "How many guards do we have in Kisumu? -> services_at_location" in text
+    assert "rank_customers + find_contracts" in text and "several lookups" in text
+
+
+def test_every_lookup_is_declared_to_the_model():
+    declared = {d.name for d in erp_tools.gemini_tool().function_declarations}
+    assert declared == set(erp_tools.LOOKUPS) and len(declared) == 14
+
+
+def test_rank_customers_by_services_and_value(app, fake_query):
+    fake_query.queue += [[{"number": "C90001", "name": "Test Ltd", "service_items": 7, "service_groups": 2}],
+                         [{"number": "C90002", "name": "Other Ltd", "active_contracts": 2,
+                           "active_annual_amount": decimal.Decimal("500.25")}]]
+    with app.app_context():
+        a = erp_tools.rank_customers(group="alarm", limit="3")
+        b = erp_tools.rank_customers(by="contract value", limit="999")
+    assert "TOP 3" in fake_query.calls[0][0] and fake_query.calls[0][1]["glike"] == "%ALARM%"
+    assert "TOP 25" in fake_query.calls[1][0] and "h.[Status] = 1" in fake_query.calls[1][0]   # capped, active only
+    assert a["customers"][0]["service_items"] == 7 and b["ranked_by"] == "contract_value"
+    assert b["customers"][0]["active_annual_amount"] == 500.25
+
+
+@pytest.mark.parametrize("asked,used", [("city", "city"), ("branch", "responsibility_center"),
+                                        ("salesman", "salesperson"), ("nonsense", "city")])
+def test_customer_breakdown_understands_synonyms(app, fake_query, asked, used):
+    with app.app_context():
+        r = erp_tools.customer_breakdown(by=asked)
+    assert r["by"] == used
+
+
+def test_customer_breakdown_labels(app, fake_query):
+    fake_query.queue += [[{"value": "", "label": None, "customers": 5, "service_items": 9},
+                          {"value": 3, "label": None, "customers": 1, "service_items": 0}],
+                         [{"n": 40}]]
+    with app.app_context():
+        r = erp_tools.customer_breakdown(by="blocked", limit="2")
+    assert r["breakdown"][1]["value"] == "blocked for everything"
+    assert r["groups"] == 40 and "2 largest of 40" in r["note"]
+
+
+def test_services_at_location(app, fake_query):
+    fake_query.queue += [[{"service_items": 4, "customers": 2}],
+                         [{"group_code": "", "group_name": None, "items": 4}], [], []]
+    with app.app_context():
+        r = erp_tools.services_at_location("kisumu")
+        short = erp_tools.services_at_location("k")
+    assert fake_query.calls[0][1]["like"] == "%KISUMU%"
+    assert r["service_items"] == 4 and r["by_group"][0]["group_code"] == "(no group)"
+    assert "error" in short
+
+
+def test_recent_changes_window_is_limited(app, fake_query):
+    with app.app_context():
+        erp_tools.recent_service_changes(days="5000", customer_no="c90001")
+    sql, params = fake_query.calls[0]
+    assert params["neg"] == -90 and params["cust"] == "C90001" and "$Service Item Log]" in sql
+
+
+def test_customers_without_active_contract(app, fake_query):
+    fake_query.queue += [[{"number": "C90003", "name": "Gap Ltd", "service_items": 12}], [{"n": 30}]]
+    with app.app_context():
+        r = erp_tools.customers_without_active_contract(min_services="5", limit="1")
+    assert "NOT EXISTS" in fake_query.calls[0][0] and fake_query.calls[0][1]["m"] == 5
+    assert r["customers_without_active_contract"] == 30 and "top 1 of 30" in r["note"]
+
+
+def test_contract_trend_months(app, fake_query):
+    fake_query.queue.append([{"y": 2030, "mo": 3, "contracts_started": 4, "signed": 1,
+                              "annual_amount": decimal.Decimal("10.5")}])
+    with app.app_context():
+        r = erp_tools.contract_trend(months="6")
+    assert fake_query.calls[0][1]["neg"] == -6
+    assert r["per_month"] == [{"month": "2030-03", "contracts_started": 4, "signed": 1, "annual_amount": 10.5}]
+
+
+def test_data_quality_sections(app, fake_query):
+    fake_query.queue += [[{"total": 10, "without_group": 3}], [{"total": 5, "without_city": 1}],
+                         [{"total": 2, "not_signed": 1}]]
+    with app.app_context():
+        r = erp_tools.data_quality()
+    assert r["service_items"]["without_group"] == 3 and r["contracts"]["not_signed"] == 1
