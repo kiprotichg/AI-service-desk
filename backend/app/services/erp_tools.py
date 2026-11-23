@@ -10,6 +10,7 @@ Who may use them: users whose email domain is in ERP_ALLOWED_EMAIL_DOMAINS.
 import datetime as dt
 import decimal
 import logging
+import re
 
 from flask import current_app
 
@@ -26,6 +27,29 @@ ITEM_STATUS = {0: "none", 1: "own service item", 2: "installed", 3: "temporarily
                4: "defective"}
 CONTRACT_TYPE = {0: "quote", 1: "contract", 2: "template"}
 CONTRACT_STATUS = {0: "not signed", 1: "signed", 2: "cancelled"}
+
+# NAV stores date formulas (e.g. "1Y") with each unit as a control character.
+_DF_UNITS = {"\x01": ("C", "current"), "\x02": ("D", "day"), "\x03": ("WD", "weekday"),
+             "\x04": ("W", "week"), "\x05": ("M", "month"), "\x06": ("Q", "quarter"),
+             "\x07": ("Y", "year")}
+_DF_PART = re.compile(r"([+-]?)(\d*)([\x01-\x07])")
+
+
+def nav_date_formula(value):
+    """NAV date formula -> readable text: "1\x07" -> "1Y (1 year)", "" -> None.
+    Anything that isn't a date formula is returned unchanged."""
+    if not value:
+        return None
+    code, words = "", []
+    for sign, digits, unit in _DF_PART.findall(value):
+        short, name = _DF_UNITS[unit]
+        code += f"{sign}{digits}{short}"
+        if short == "C":
+            words.append("current period")
+        else:
+            n = int(digits or 1)
+            words.append(f"{'-' if sign == '-' else ''}{n} {name}{'' if n == 1 else 's'}")
+    return f"{code} ({', '.join(words)})" if code else value
 
 
 # ------------------------------------------------------------- who may use them
@@ -185,6 +209,7 @@ def find_contracts(query):
     for r in out:
         r["type"] = CONTRACT_TYPE.get(r["type"], r["type"])
         r["status"] = CONTRACT_STATUS.get(r["status"], r["status"])
+        r["price_update_period"] = nav_date_formula(r.get("price_update_period"))
     return {"contracts": out}
 
 

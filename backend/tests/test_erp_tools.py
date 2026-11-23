@@ -216,3 +216,19 @@ def test_failed_lookup_gets_no_live_data_note(app, client, monkeypatch):
     done = [json.loads(line) for line in res.get_data(as_text=True).splitlines()][-1]
     assert len(fake.calls) == 2                 # the model still got the error and answered
     assert done["reply"]["erp_note"] == ""      # ...but without claiming live ERP data
+
+
+@pytest.mark.parametrize("stored,shown", [
+    ("1\x07", "1Y (1 year)"), ("2\x07", "2Y (2 years)"), ("3\x05", "3M (3 months)"),
+    ("-1\x04", "-1W (-1 week)"), ("1\x01", "1C (current period)"), ("", None), ("odd", "odd"),
+])
+def test_nav_date_formulas_are_readable(stored, shown):
+    assert erp_tools.nav_date_formula(stored) == shown
+
+
+def test_contract_price_update_period_is_decoded(app, fake_query):
+    fake_query.queue.append([{"contract_no": "SC00146", "type": 1, "status": 1,
+                              "price_update_period": "1\x07"}])
+    with app.app_context():
+        c = erp_tools.find_contracts("SC00146")["contracts"][0]
+    assert c["price_update_period"] == "1Y (1 year)" and c["status"] == "signed"
