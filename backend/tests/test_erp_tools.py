@@ -225,6 +225,32 @@ def test_failed_lookup_gets_no_live_data_note(app, client, monkeypatch):
     assert done["reply"]["erp_note"] == ""      # ...but without claiming live ERP data
 
 
+class GreedyGemini(LookupGemini):
+    """Keeps asking for lookups, even on the last round, until told to answer now."""
+    def _stream(self, **kw):
+        self.calls.append(kw)
+        last = kw["contents"][-1].parts[0]
+        if getattr(last, "text", None) == ai_service.ANSWER_NOW:
+            text = SimpleNamespace(function_call=None, text="Both have contracts, per the ERP.", thought=False)
+            return iter([SimpleNamespace(text=text.text, candidates=[SimpleNamespace(content=SimpleNamespace(parts=[text]))])])
+        call = SimpleNamespace(name="find_contracts", args={"query": f"q{len(self.calls)}"}, id=f"c{len(self.calls)}")
+        part = SimpleNamespace(function_call=call, text=None, thought=False)
+        return iter([SimpleNamespace(text=None, candidates=[SimpleNamespace(content=SimpleNamespace(parts=[part]))])])
+
+
+def test_model_that_never_stops_looking_up_is_asked_to_answer(app, client, monkeypatch):
+    _, looked_up, conv = _setup(app, monkeypatch, client, "jane@idealdynamics.co.ke")
+    fake = GreedyGemini()
+    monkeypatch.setattr(ai_service, "_get_gemini_client", lambda: fake)
+    res = client.post(f"/api/conversations/{conv['id']}/messages?stream=1",
+                      headers={"X-Conversation-Token": conv["token"]},
+                      json={"content": "Do our top customers have contracts?", "mode": "service"})
+    done = [json.loads(line) for line in res.get_data(as_text=True).splitlines()][-1]
+    assert len(looked_up) == ai_service.MAX_LOOKUP_ROUNDS     # no lookups beyond the limit
+    assert len(fake.calls) == ai_service.MAX_LOOKUP_ROUNDS + 2  # last round, then "answer now"
+    assert done["reply"]["content"].startswith("Both have contracts")
+
+
 @pytest.mark.parametrize("stored,shown", [
     ("1\x07", "1Y (1 year)"), ("2\x07", "2Y (2 years)"), ("3\x05", "3M (3 months)"),
     ("-1\x04", "-1W (-1 week)"), ("1\x01", "1C (current period)"), ("", None), ("odd", "odd"),

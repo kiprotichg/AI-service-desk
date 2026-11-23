@@ -1,0 +1,100 @@
+[
+  {"id": "customer-by-number", "question": "Who is customer C90001?",
+   "expect_lookups": ["find_customers"],
+   "fake": {"find_customers": {"customers": [{"number": "C90001", "name": "Test Bank Ltd", "city": "Nairobi", "blocked": false}]}},
+   "expect_facts": ["Test Bank Ltd", "Nairobi"]},
+
+  {"id": "customer-services", "question": "What services does C90001 have?",
+   "expect_lookups": ["customer_services"],
+   "fake": {"customer_services": {"customer_no": "C90001", "customer_name": "Test Bank Ltd", "total": 3,
+     "by_group": [{"group_code": "GUARD", "group_name": "Guard posts", "items": 2}, {"group_code": "ALARM", "group_name": "Alarm services", "items": 1}],
+     "items": [{"number": "SI9001", "description": "Guard post Main Branch"}, {"number": "SI9002", "description": "Guard post ATM"}, {"number": "SI9003", "description": "Alarm Main Branch"}]}},
+   "expect_facts": ["3", "guard", "alarm"]},
+
+  {"id": "service-total", "question": "How many alarm services do we have?",
+   "expect_lookups": ["service_summary"],
+   "fake": {"service_summary": {"group": "alarm", "total": 412, "customers": 187, "by_group": [{"group_code": "ALARM", "group_name": "Alarm services", "items": 412}]}},
+   "expect_facts": ["412"]},
+
+  {"id": "active-contracts", "question": "How many active contracts do we have, and what are they worth a year?",
+   "expect_lookups": ["contract_summary"],
+   "fake": {"contract_summary": {"show": "active", "active": 58, "active_annual_amount": 1234567.0, "signed": 70, "not_signed": 9, "cancelled": 4}},
+   "expect_facts": ["58", ["1234567", "1.23 million", "1.2 million"]]},
+
+  {"id": "overdue-invoices", "question": "Which contract invoices are overdue?",
+   "expect_lookups": ["contract_summary"],
+   "fake": {"contract_summary": {"show": "invoice_overdue", "invoice_overdue": 2,
+     "contracts": [{"contract_no": "SC90011", "customer_name": "Test Bank Ltd", "next_invoice_date": "2026-10-01"}, {"contract_no": "SC90012", "customer_name": "Sample Stores", "next_invoice_date": "2026-09-15"}]}},
+   "expect_facts": ["SC90011", "SC90012"]},
+
+  {"id": "contract-next-invoice", "question": "When is contract SC90011 next invoiced?",
+   "expect_lookups": [["find_contracts", "contract_details"]],
+   "fake": {"find_contracts": {"contracts": [{"contract_no": "SC90011", "customer_name": "Test Bank Ltd", "status": "signed", "next_invoice_date": "2026-12-01", "invoice_period": "monthly"}]},
+            "contract_details": {"found": true, "contract": {"contract_no": "SC90011", "customer_name": "Test Bank Ltd", "status": "signed", "next_invoice_date": "2026-12-01", "invoice_period": "monthly"}, "lines": [], "line_count": 0}},
+   "expect_facts": [["2026-12-01", "1 december 2026", "december 1, 2026", "1 dec 2026", "dec 1, 2026", "1st december 2026", "01/12/2026"]]},
+
+  {"id": "contract-lines", "question": "Which service items does contract SC90011 cover, and at what price each?",
+   "expect_lookups": ["contract_details"],
+   "fake": {"contract_details": {"found": true, "contract": {"contract_no": "SC90011", "customer_name": "Test Bank Ltd", "status": "signed"},
+     "lines": [{"service_item_no": "SI9001", "description": "Guard post Main Branch", "line_amount": 45000}, {"service_item_no": "SI9003", "description": "Alarm Main Branch", "line_amount": 3500}],
+     "line_count": 2, "lines_total_amount": 48500}},
+   "expect_facts": ["SI9001", "SI9003", "45000", "3500"]},
+
+  {"id": "blocked", "question": "How many customers are blocked, and who are they?",
+   "expect_lookups": ["blocked_customers"],
+   "fake": {"blocked_customers": {"blocked": 2, "customers": [{"number": "C90007", "name": "Old Traders"}, {"number": "C90008", "name": "Closed Shop Ltd"}]}},
+   "expect_facts": ["2", "Old Traders", "Closed Shop"]},
+
+  {"id": "top-customers", "question": "Who are our top 3 customers by number of guard posts?",
+   "expect_lookups": ["rank_customers"],
+   "fake": {"rank_customers": {"by": "services", "group": "guard", "customers": [{"customer_no": "C90001", "name": "Test Bank Ltd", "services": 40}, {"customer_no": "C90002", "name": "Sample Stores", "services": 31}, {"customer_no": "C90003", "name": "Demo Hospital", "services": 22}]}},
+   "expect_facts": ["Test Bank", "Sample Stores", "Demo Hospital", "40"]},
+
+  {"id": "by-city", "question": "Which towns do most of our customers come from?",
+   "expect_lookups": ["customer_breakdown"],
+   "fake": {"customer_breakdown": {"by": "city", "rows": [{"value": "Nairobi", "customers": 300}, {"value": "Mombasa", "customers": 90}, {"value": "Kisumu", "customers": 45}]}},
+   "expect_facts": ["Nairobi", "300", "Mombasa"]},
+
+  {"id": "place", "question": "How many guards do we have in Kisumu?",
+   "expect_lookups": ["services_at_location"],
+   "fake": {"services_at_location": {"place": "Kisumu", "group": "guard", "service_items": 27, "customers": 11, "by_group": [{"group_code": "GUARD", "group_name": "Guard posts", "items": 27}]}},
+   "expect_facts": ["27"]},
+
+  {"id": "recent-changes", "question": "What changed on service items this week?",
+   "expect_lookups": ["recent_service_changes"],
+   "fake": {"recent_service_changes": {"days": 7, "changes": 14, "items": 5, "most_changed": [{"number": "SI9002", "description": "Guard post ATM", "changes": 6}]}},
+   "expect_facts": ["14", "SI9002"]},
+
+  {"id": "no-contract", "question": "Which customers have services but no active contract?",
+   "expect_lookups": ["customers_without_active_contract"],
+   "fake": {"customers_without_active_contract": {"total": 1, "customers": [{"customer_no": "C90005", "name": "Uncovered Ltd", "services": 6}]}},
+   "expect_facts": ["Uncovered Ltd"]},
+
+  {"id": "trend", "question": "How many contracts did we start each month this year?",
+   "expect_lookups": ["contract_trend"],
+   "fake": {"contract_trend": {"months": [{"month": "2026-09", "started": 4}, {"month": "2026-10", "started": 7}, {"month": "2026-11", "started": 2}]}},
+   "expect_facts": ["7", ["october", "2026-10", "oct"]]},
+
+  {"id": "data-quality", "question": "How complete is our ERP data? What's missing?",
+   "expect_lookups": ["data_quality"],
+   "fake": {"data_quality": {"service_items": 1000, "without_group": 640, "without_serial_no": 910, "customers_without_city": 12}},
+   "expect_facts": ["640", "serial"]},
+
+  {"id": "combined-top-contracts", "question": "Do our top 2 customers by services both have active contracts?",
+   "expect_lookups": ["rank_customers", ["find_contracts", "contract_summary", "customers_without_active_contract"]],
+   "fake": {"rank_customers": {"by": "services", "customers": [{"customer_no": "C90001", "name": "Test Bank Ltd", "services": 40}, {"customer_no": "C90005", "name": "Uncovered Ltd", "services": 35}]},
+            "find_contracts": {"contracts": [{"contract_no": "SC90011", "customer_no": "C90001", "customer_name": "Test Bank Ltd", "status": "signed", "active": true}]},
+            "customers_without_active_contract": {"total": 1, "customers": [{"customer_no": "C90005", "name": "Uncovered Ltd", "services": 35}]}},
+   "expect_facts": ["Test Bank", "Uncovered Ltd"]},
+
+  {"id": "no-invoice-data", "question": "What is the outstanding balance on C90001's account?",
+   "expect_lookups": [],
+   "fake": {"find_customers": {"customers": [{"number": "C90001", "name": "Test Bank Ltd"}]}},
+   "expect_facts": [["no invoice", "not available", "don't have", "do not have", "can't see", "cannot see", "isn't available", "not have access", "no balance", "no payment", "unable"]],
+   "forbid_facts": ["kes ", "ksh"]},
+
+  {"id": "not-found", "question": "Who is customer C99999?",
+   "expect_lookups": ["find_customers"],
+   "fake": {"find_customers": {"customers": []}},
+   "expect_facts": [["no customer", "not found", "couldn't find", "could not find", "no match", "no record", "doesn't exist", "does not exist", "didn't find", "did not find", "no results", "wasn't found", "couldn't locate", "could not locate", "unable to find", "no such", "isn't in", "is not in", "not in the erp", "returned no", "no matching", "no data"]]}
+]

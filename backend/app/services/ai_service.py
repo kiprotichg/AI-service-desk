@@ -452,6 +452,8 @@ def _gemini_config(system, web_search, json_output=False, lookups=False, allow_c
 
 
 MAX_LOOKUP_ROUNDS = 3
+ANSWER_NOW = ("Answer my question now using the ERP data the lookups above returned. Don't call "
+              "any more lookups; if something is missing, say what you couldn't find.")
 
 
 def _chunk_parts(chunk):
@@ -490,7 +492,8 @@ def _gemini_stream(history, user_turn, attachments, system, web_search, mode, us
         splitter, sources, started, used = _MetaSplitter(), [], False, []
         convo = list(contents)
         try:
-            for round_no in range(MAX_LOOKUP_ROUNDS + 1):
+            nudged = False
+            for round_no in range(MAX_LOOKUP_ROUNDS + 2):
                 config = _gemini_config(system, web_search, lookups=lookups,
                                         allow_calls=round_no < MAX_LOOKUP_ROUNDS)
                 calls, model_parts = [], []
@@ -508,8 +511,17 @@ def _gemini_stream(history, user_turn, attachments, system, web_search, mode, us
                     if web_search:
                         sources = _gemini_sources(chunk) or sources
                 # Lookups run only for users allowed to use them, whatever the model asks for.
-                if not calls or started or not lookups:
+                if started or not lookups:
                     break
+                if not calls or round_no >= MAX_LOOKUP_ROUNDS:
+                    # No text after the lookups (it stopped, or wanted yet more lookups
+                    # on the last round): ask once more to answer from what it has, so
+                    # the user gets an answer instead of the "human agent" reply.
+                    if nudged or len(convo) == len(contents):   # only after lookups ran
+                        break
+                    nudged = True
+                    convo.append(types.Content(role="user", parts=[types.Part(text=ANSWER_NOW)]))
+                    continue
                 # Keep the model's own parts (they carry its thought signatures) and add the results.
                 convo += [types.Content(role="model", parts=model_parts),
                           types.Content(role="user", parts=_lookup_responses(calls, used))]

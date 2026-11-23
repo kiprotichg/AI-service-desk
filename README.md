@@ -564,6 +564,25 @@ like Render. `ERP_DRIVER=pyodbc` or `ERP_DRIVER=pymssql` forces one; the default
 **Speed:** answers that use a lookup take a few seconds longer, about 5–10 s. Gemini
 asks for the data, the lookup itself takes about 0.1 s, then Gemini writes the answer.
 
+**Measuring accuracy (scored test set):**
+- `backend/evals/erp_questions.json` has 18 ERP questions. These include single facts,
+  counts, rankings, places, trends, a combined question, a "not found" question and an
+  "we have no invoice data" question.
+- Each question comes with made-up ERP data, the lookups the assistant should call and
+  the facts its answer must contain.
+- `python -m evals.run_erp_eval` (run in `backend`, needs `GEMINI_API_KEY`) asks Gemini
+  every question through the real chat code. It gives Gemini the made-up data instead of
+  querying the ERP.
+- Each answer is scored: 40% for calling the right lookups, 60% for containing the right
+  facts. An answer that invents data (for example a balance we don't have) gets no fact
+  score.
+- It prints PASS or FAIL per question and a total score.
+- Options: `--only <id>` runs one question, `--min 90` fails the run below 90%, and
+  `--json results.json` saves every answer.
+- Questions where Gemini is busy are retried, then skipped and left out of the score.
+- `tests/test_erp_eval.py` checks the question file and the scoring without calling the
+  model.
+
 ### Response speed
 
 Measured with the real Gemini key: almost all of the waiting is the model. The Flask app
