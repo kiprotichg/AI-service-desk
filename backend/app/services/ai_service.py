@@ -12,9 +12,10 @@ import logging
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
-from flask import current_app
+from flask import current_app, has_app_context
 
 from . import erp_tools, knowledge_base
 
@@ -427,7 +428,7 @@ def _is_overloaded(exc):
     text = str(exc).lower()
     return any(s in text for s in ("503", "unavailable", "high demand", "overloaded",
                                    "429", "resource_exhausted", "500", "internal", "404",
-                                   "not found"))
+                                   "not found", "timeout", "timed out"))
 
 
 def _gemini_models():
@@ -473,11 +474,25 @@ def _chunk_parts(chunk):
 
 
 def _lookup_responses(calls, used):
-    """Run the ERP lookups the model asked for; one function_response part per call."""
+    """Run the ERP lookups the model asked for; one function_response part per call.
+
+    Several lookups asked for at once run at the same time, so a combined question
+    waits for the slowest one instead of all of them in turn.
+    """
     from google.genai import types
+    if len(calls) > 1:
+        app = current_app._get_current_object()
+
+        def run(call):
+            with app.app_context():
+                return erp_tools.run_lookup(call.name, dict(call.args or {}))
+
+        with ThreadPoolExecutor(max_workers=min(len(calls), 4)) as pool:
+            results = list(pool.map(run, calls))
+    else:
+        results = [erp_tools.run_lookup(call.name, dict(call.args or {})) for call in calls]
     parts = []
-    for call in calls:
-        result = erp_tools.run_lookup(call.name, dict(call.args or {}))
+    for call, result in zip(calls, results):
         if "error" not in result:   # only real ERP data earns the "live data" note
             used.append(call.name)
         parts.append(types.Part(function_response=types.FunctionResponse(
@@ -733,8 +748,12 @@ def _get_gemini_client():
         # (GEMINI_FALLBACK_MODEL) takes over. Worst case adds about 0.5 + 1 seconds.
         retry = types.HttpRetryOptions(attempts=3, initial_delay=0.5, max_delay=2.0,
                                        exp_base=2.0, http_status_codes=[429, 500, 502, 503, 504])
+        # A request that hangs (seen: 3 minutes before the first word) gives up after
+        # GEMINI_TIMEOUT_SECONDS, and the fallback model answers instead.
+        seconds = current_app.config.get("GEMINI_TIMEOUT_SECONDS", 25) if has_app_context() else 25
+        timeout_ms = int(seconds * 1000)
         _gemini_client = genai.Client(  # reads GEMINI_API_KEY (or GOOGLE_API_KEY)
-            http_options=types.HttpOptions(retry_options=retry))
+            http_options=types.HttpOptions(retry_options=retry, timeout=timeout_ms))
     return _gemini_client
 
 

@@ -39,6 +39,9 @@ class Config:
     GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.1-flash-lite")
     # How much the model thinks before answering: minimal is fastest. Empty = model default.
     GEMINI_THINKING = os.getenv("GEMINI_THINKING", "minimal")
+    # Give up on a Gemini request that hasn't answered in this many seconds (then the
+    # fallback model is tried), instead of leaving the user waiting for minutes.
+    GEMINI_TIMEOUT_SECONDS = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "25") or 25)
 
     # Live, read-only access to the Dynamics NAV / Business Central database.
     # Use a login that can only read (db_datareader). Off while any of these is empty.

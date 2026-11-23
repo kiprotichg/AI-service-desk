@@ -456,3 +456,28 @@ def test_contract_details_header_and_lines(app, fake_query):
 def test_contract_details_not_found(app, fake_query):
     with app.app_context():
         assert erp_tools.contract_details("NOPE")["found"] is False
+
+
+def test_several_lookups_run_together_and_keep_their_order(app, monkeypatch):
+    import threading
+    import time as _time
+    threads = set()
+
+    def slow(name, args):
+        threads.add(threading.get_ident())
+        _time.sleep(0.3)
+        return {"name": name}
+
+    monkeypatch.setattr(erp_tools, "run_lookup", slow)
+    calls = [SimpleNamespace(name=n, args={}, id=n) for n in ("a", "b", "c")]
+    used = []
+    with app.app_context():
+        start = _time.monotonic()
+        parts = ai_service._lookup_responses(calls, used)
+        took = _time.monotonic() - start
+    assert [p.function_response.name for p in parts] == ["a", "b", "c"] and used == ["a", "b", "c"]
+    assert len(threads) == 3 and took < 0.8   # together, not one after another (0.9 s)
+
+
+def test_timeout_counts_as_overloaded():
+    assert ai_service._is_overloaded(TimeoutError("The read operation timed out"))
