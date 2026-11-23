@@ -486,8 +486,8 @@ database. It uses Gemini only (`AI_PROVIDER=gemini`).
 **Settings** (`backend/.env`):
 
 ```
-ERP_DB_HOST=102.210.149.128
-ERP_DB_PORT=2026
+ERP_DB_HOST=<your SQL Server address>
+ERP_DB_PORT=<its port, 1433 by default>
 ERP_DB_NAME=IDEALDYNAMICS_TEST
 ERP_DB_USER=ai_reader              # a login with db_datareader only, ideally
 ERP_DB_PASSWORD=...

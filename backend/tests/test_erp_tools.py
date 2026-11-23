@@ -11,7 +11,7 @@ from app.config import TestConfig
 from app.extensions import db
 from app.services import ai_service, erp, erp_tools
 
-ERP = dict(ERP_DB_HOST="h", ERP_DB_PORT="2026", ERP_DB_NAME="IDEALDYNAMICS_TEST", ERP_DB_USER="u",
+ERP = dict(ERP_DB_HOST="h", ERP_DB_PORT="1433", ERP_DB_NAME="IDEALDYNAMICS_TEST", ERP_DB_USER="u",
            ERP_DB_PASSWORD="p", ERP_COMPANY="IDEALDYNAMICS_PROP",
            ERP_ALLOWED_EMAIL_DOMAINS="IdealDynamics.co.ke, @partner.example")
 
@@ -232,3 +232,46 @@ def test_contract_price_update_period_is_decoded(app, fake_query):
     with app.app_context():
         c = erp_tools.find_contracts("SC00146")["contracts"][0]
     assert c["price_update_period"] == "1Y (1 year)" and c["status"] == "signed"
+
+
+def test_contract_summary_counts_and_lists_active(app, fake_query):
+    fake_query.queue += [
+        [{"as_of": dt.date(2030, 1, 15), "all_records": 120, "contracts": 118, "quotes": 2,
+          "active": 12, "signed": 13, "not_signed": 105, "cancelled": 2,
+          "expiring_within_60_days": 1, "invoices_due_within_30_days": 3,
+          "active_annual_amount": decimal.Decimal("1000.50"), "active_customers": 9}],
+        [{"contract_no": "SC90001", "status": 1, "description": "GUARDING SERVICES",
+          "expiration_date": dt.datetime(1753, 1, 1)}],
+    ]
+    with app.app_context():
+        r = erp_tools.contract_summary()
+    totals_sql, list_sql = fake_query.calls[0][0], fake_query.calls[1][0]
+    # "Active" = signed contract, started, not expired.
+    assert "h.[Status] = 1" in list_sql and "[Starting Date] <=" in list_sql and "[Expiration Date]" in list_sql
+    assert "[IDEALDYNAMICS_PROP$Service Contract Header]" in totals_sql
+    assert r["summary"]["active"] == 12 and r["summary"]["active_annual_amount"] == 1000.5
+    assert r["contracts"][0]["status"] == "signed" and r["contracts"][0]["expiration_date"] is None
+    json.dumps(r)
+
+
+def test_contract_summary_other_lists_and_bad_input(app, fake_query):
+    with app.app_context():
+        assert erp_tools.contract_summary("not signed")["list"] == "not signed"
+        assert "h.[Status] = 0" in fake_query.calls[-1][0]
+        assert erp_tools.contract_summary("drop table")["list"] == "active"   # unknown -> active
+
+
+def test_contract_summary_is_offered_to_the_model():
+    names = [d.name for d in erp_tools.gemini_tool().function_declarations]
+    assert "contract_summary" in names
+
+
+def test_due_and_overdue_invoices_are_separate(app, fake_query):
+    with app.app_context():
+        erp_tools.contract_summary("invoice due")
+        due_sql = fake_query.calls[-1][0]
+        erp_tools.contract_summary("invoice overdue")
+        overdue_sql = fake_query.calls[-1][0]
+    assert "[Next Invoice Date] >= CAST(GETDATE() AS date)" in due_sql       # not in the past
+    assert "[Next Invoice Date] < CAST(GETDATE() AS date)" in overdue_sql    # only the past
+    assert "invoices_overdue" in fake_query.calls[0][0]

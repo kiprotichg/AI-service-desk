@@ -87,6 +87,8 @@ def _like(text):
 def _clean(value):
     if isinstance(value, dt.datetime):
         return None if value <= NAV_EMPTY_DATE else value.date().isoformat()
+    if isinstance(value, dt.date):   # e.g. CAST(GETDATE() AS date)
+        return None if value <= NAV_EMPTY_DATE.date() else value.isoformat()
     if isinstance(value, decimal.Decimal):
         return float(value)
     if isinstance(value, str):
@@ -213,6 +215,66 @@ def find_contracts(query):
     return {"contracts": out}
 
 
+# A contract counts as active when it's a signed contract (not a quote), it has
+# started, and it hasn't expired (NAV's empty date, 1753-01-01, means no expiry).
+_TODAY = "CAST(GETDATE() AS date)"
+_ACTIVE = (f"h.[Contract Type] = 1 AND h.[Status] = 1 AND h.[Starting Date] <= {_TODAY} "
+           f"AND (h.[Expiration Date] < '1753-01-02' OR h.[Expiration Date] >= {_TODAY})")
+_CONTRACT_LISTS = {
+    "active": _ACTIVE,
+    "signed": "h.[Status] = 1",
+    "not signed": "h.[Status] = 0",
+    "cancelled": "h.[Status] = 2",
+    "expiring": f"{_ACTIVE} AND h.[Expiration Date] >= '1753-01-02' "
+                f"AND h.[Expiration Date] < DATEADD(day, 60, {_TODAY})",
+    "invoice due": f"{_ACTIVE} AND h.[Next Invoice Date] >= {_TODAY} "
+                   f"AND h.[Next Invoice Date] < DATEADD(day, 30, {_TODAY})",
+    "invoice overdue": f"{_ACTIVE} AND h.[Next Invoice Date] >= '1753-01-02' "
+                       f"AND h.[Next Invoice Date] < {_TODAY}",
+    "all": "1 = 1",
+}
+
+
+def contract_summary(show="active"):
+    """Contract totals (active, signed, not signed, cancelled, expiring, invoices due)
+    and a list of the contracts in one of those groups."""
+    show = (show or "active").strip().lower()
+    if show not in _CONTRACT_LISTS:
+        show = "active"
+    flag = lambda cond: f"SUM(CASE WHEN {cond} THEN 1 ELSE 0 END)"
+    totals = erp.query(
+        f"SELECT {_TODAY} AS as_of, COUNT(*) AS all_records, "
+        f"{flag('h.[Contract Type] = 1')} AS contracts, {flag('h.[Contract Type] = 0')} AS quotes, "
+        f"{flag(_ACTIVE)} AS active, {flag('h.[Status] = 1')} AS signed, "
+        f"{flag('h.[Status] = 0')} AS not_signed, {flag('h.[Status] = 2')} AS cancelled, "
+        f"{flag(_CONTRACT_LISTS['expiring'])} AS expiring_within_60_days, "
+        f"{flag(_CONTRACT_LISTS['invoice due'])} AS invoices_due_within_30_days, "
+        f"{flag(_CONTRACT_LISTS['invoice overdue'])} AS invoices_overdue, "
+        f"SUM(CASE WHEN {_ACTIVE} THEN h.[Annual Amount] ELSE 0 END) AS active_annual_amount, "
+        f"COUNT(DISTINCT CASE WHEN {_ACTIVE} THEN NULLIF(h.[Customer No_], '') END) AS active_customers "
+        f"FROM {_t('Service Contract Header')} h")
+    listed = erp.query(
+        f"SELECT TOP 30 h.[Contract No_] AS contract_no, h.[Description] AS description, "
+        f"h.[Status] AS status, h.[Customer No_] AS customer_no, c.[Name] AS customer_name, "
+        f"h.[Starting Date] AS starting_date, h.[Expiration Date] AS expiration_date, "
+        f"h.[Next Invoice Date] AS next_invoice_date, h.[Annual Amount] AS annual_amount "
+        f"FROM {_t('Service Contract Header')} h LEFT JOIN {_t('Customer')} c ON c.[No_] = h.[Customer No_] "
+        f"WHERE {_CONTRACT_LISTS[show]} ORDER BY h.[Contract No_]")
+    out = _rows(listed)
+    for r in out:
+        r["status"] = CONTRACT_STATUS.get(r["status"], r["status"])
+    summary = _rows(totals)[0] if totals else {}
+    shown_total = {"active": "active", "signed": "signed", "not signed": "not_signed",
+                   "cancelled": "cancelled", "expiring": "expiring_within_60_days",
+                   "invoice due": "invoices_due_within_30_days",
+                   "invoice overdue": "invoices_overdue", "all": "all_records"}[show]
+    count = summary.get(shown_total) or 0
+    return {"summary": summary,
+            "definition_of_active": "signed contract that has started and has not expired",
+            "list": show, "contracts": out,
+            "note": f"Listing the first {len(out)} of {count}." if count > len(out) else ""}
+
+
 def blocked_customers():
     """Customers that are blocked, and how many."""
     counted = erp.query(f"SELECT COUNT(*) AS n FROM {_t('Customer')} WHERE [Blocked] <> 0")
@@ -250,6 +312,16 @@ LOOKUPS = {
                        "description: type, status, start/expiry dates, next invoice date and period.",
                        {"query": dict(_STR, description="Contract number, customer number or description text")},
                        ["query"]),
+    "contract_summary": (contract_summary, "Count service contracts: how many are active (signed, "
+                         "started, not expired), signed, not signed, cancelled, expiring within 60 days, "
+                         "have an invoice due within the next 30 days, or have an overdue next "
+                         "invoice date (in the past), plus the yearly value of active "
+                         "contracts. Also lists the contracts in one of those groups. Use it for any "
+                         "question about how many contracts there are or which are active.",
+                         {"show": dict(_STR, description="Which contracts to list: active (default), "
+                                       "signed, not signed, cancelled, expiring, invoice due, "
+                                       "invoice overdue, or all")},
+                         []),
     "blocked_customers": (blocked_customers, "How many customers are blocked, and which ones.", {}, []),
 }
 
@@ -291,7 +363,8 @@ def instructions(app=None):
 Live ERP data: you can look up the company's Dynamics NAV data (company {company}) with the
 provided functions: customers, their service items (guard posts, alarm services, cash in
 transit and other services), single service items and their change history, totals per
-service group, service contracts and blocked customers. Use a lookup whenever the user asks
+service group, service contracts (single ones, and totals such as how many are active),
+and blocked customers. Use a lookup whenever the user asks
 about a specific customer, service, contract or a count; never guess or invent ERP data.
 Say briefly that the figures come from the ERP. If a lookup finds nothing or fails, say so
 plainly. There is no invoice, payment or balance data, and you can't see employees, payroll

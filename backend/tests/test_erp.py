@@ -7,7 +7,7 @@ from app.config import TestConfig
 from app.extensions import db
 from app.services import erp
 
-SETTINGS = dict(ERP_DB_HOST="102.0.0.1", ERP_DB_PORT="2026", ERP_DB_NAME="IDEALDYNAMICS_TEST",
+SETTINGS = dict(ERP_DB_HOST="102.0.0.1", ERP_DB_PORT="1433", ERP_DB_NAME="IDEALDYNAMICS_TEST",
                 ERP_DB_USER="ai_reader", ERP_DB_PASSWORD="p;ss{word}", ERP_COMPANY="IDEALDYNAMICS_PROP",
                 ERP_ODBC_DRIVER="ODBC Driver 18 for SQL Server", ERP_TRUST_CERT=True)
 
@@ -44,7 +44,7 @@ def test_off_until_all_settings_are_filled(app):
 
 def test_connection_string_is_read_only_and_escapes_the_password():
     s = erp.connection_string(SETTINGS)
-    assert "SERVER=102.0.0.1,2026" in s and "DATABASE=IDEALDYNAMICS_TEST" in s
+    assert "SERVER=102.0.0.1,1433" in s and "DATABASE=IDEALDYNAMICS_TEST" in s
     assert "ApplicationIntent=ReadOnly" in s and "Encrypt=yes" in s
     assert "PWD={p;ss{word}}}" in s          # ; and } can't break out of the value
 
@@ -121,14 +121,14 @@ def test_driver_choice(monkeypatch):
 
 def test_pymssql_url_keeps_odd_passwords_intact():
     url = erp._pymssql_url(dict(SETTINGS, ERP_DB_PASSWORD="p@ss:w/rd;#1"))
-    assert url.drivername == "mssql+pymssql" and url.port == 2026
+    assert url.drivername == "mssql+pymssql" and url.port == 1433
     assert url.password == "p@ss:w/rd;#1" and url.host == "102.0.0.1"
 
 
 def test_startup_check_logs_success_and_failure(app, fake_erp, caplog, monkeypatch):
     from app import erp_startup_check
     assert erp_startup_check(app) is True
-    assert "ERP check: connected to 102.0.0.1:2026/IDEALDYNAMICS_TEST as ai_reader" in caplog.text
+    assert "ERP check: connected to 102.0.0.1:1433/IDEALDYNAMICS_TEST as ai_reader" in caplog.text
 
     def refuse(*a, **k):
         raise RuntimeError("Adaptive Server is unavailable or does not exist (102.0.0.1) p;ss{word}")
@@ -191,7 +191,7 @@ def test_unreachable_lookup_gives_a_clear_message(app, monkeypatch):
     app.config.update(SETTINGS)
 
     def unreachable(*a, **k):
-        raise erp.ERPUnreachable("The ERP server 1.2.3.4:2026 isn't answering")
+        raise erp.ERPUnreachable("The ERP server 1.2.3.4:1433 isn't answering")
     monkeypatch.setattr(erp, "query", unreachable)
     with app.app_context():
         out = erp_tools.run_lookup("find_customers", {"query": "bank"})
