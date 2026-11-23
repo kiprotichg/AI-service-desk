@@ -370,3 +370,14 @@ def test_data_quality_sections(app, fake_query):
     with app.app_context():
         r = erp_tools.data_quality()
     assert r["service_items"]["without_group"] == 3 and r["contracts"]["not_signed"] == 1
+
+
+def test_contract_extra_fields(app, fake_query):
+    fake_query.queue.append([{"contract_no": "SC90001", "type": 1, "status": 1, "service_period": "2\x07",
+                              "invoice_period": 2, "payment_terms": "30 DAYS", "salesperson_code": "S1",
+                              "salesperson_name": "Test Person"}])
+    with app.app_context():
+        c = erp_tools.find_contracts("SC90001")["contracts"][0]
+    sql = fake_query.calls[0][0]
+    assert "$Salesperson_Purchaser]" in sql and "$Responsibility Center]" in sql
+    assert c["service_period"] == "2Y (2 years)" and c["invoice_period"] == "quarterly"

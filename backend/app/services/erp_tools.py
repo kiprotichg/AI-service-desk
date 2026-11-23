@@ -27,6 +27,8 @@ ITEM_STATUS = {0: "none", 1: "own service item", 2: "installed", 3: "temporarily
                4: "defective"}
 CONTRACT_TYPE = {0: "quote", 1: "contract", 2: "template"}
 CONTRACT_STATUS = {0: "not signed", 1: "signed", 2: "cancelled"}
+INVOICE_PERIOD = {0: "monthly", 1: "every two months", 2: "quarterly", 3: "half-yearly",
+                  4: "yearly", 5: "none"}
 
 # NAV stores date formulas (e.g. "1Y") with each unit as a control character.
 _DF_UNITS = {"\x01": ("C", "current"), "\x02": ("D", "day"), "\x03": ("WD", "weekday"),
@@ -203,8 +205,13 @@ def find_contracts(query):
         f"h.[Starting Date] AS starting_date, h.[Expiration Date] AS expiration_date, "
         f"h.[Next Invoice Date] AS next_invoice_date, h.[Next Invoice Period Start] AS next_period_start, "
         f"h.[Next Invoice Period End] AS next_period_end, h.[Annual Amount] AS annual_amount, "
-        f"h.[Price Update Period] AS price_update_period "
+        f"h.[Price Update Period] AS price_update_period, h.[Service Period] AS service_period, "
+        f"h.[Invoice Period] AS invoice_period, h.[Payment Terms Code] AS payment_terms, "
+        f"h.[Salesperson Code] AS salesperson_code, sp.[Name] AS salesperson_name, "
+        f"h.[Responsibility Center] AS responsibility_center, rc.[Name] AS responsibility_center_name "
         f"FROM {_t('Service Contract Header')} h LEFT JOIN {_t('Customer')} c ON c.[No_] = h.[Customer No_] "
+        f"LEFT JOIN {_t('Salesperson_Purchaser')} sp ON sp.[Code] = h.[Salesperson Code] "
+        f"LEFT JOIN {_t('Responsibility Center')} rc ON rc.[Code] = h.[Responsibility Center] "
         f"WHERE h.[Contract No_] = :key OR h.[Customer No_] = :key OR UPPER(h.[Description]) LIKE :like "
         f"ORDER BY h.[Contract No_]", {"key": key, "like": _like(query)})
     out = _rows(rows)
@@ -212,6 +219,8 @@ def find_contracts(query):
         r["type"] = CONTRACT_TYPE.get(r["type"], r["type"])
         r["status"] = CONTRACT_STATUS.get(r["status"], r["status"])
         r["price_update_period"] = nav_date_formula(r.get("price_update_period"))
+        r["service_period"] = nav_date_formula(r.get("service_period"))
+        r["invoice_period"] = INVOICE_PERIOD.get(r.get("invoice_period"), r.get("invoice_period"))
     return {"contracts": out}
 
 
