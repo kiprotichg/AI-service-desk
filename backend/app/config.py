@@ -35,8 +35,11 @@ class Config:
     # AI_MODEL is the older name for CLAUDE_MODEL and still works.
     CLAUDE_MODEL = os.getenv("CLAUDE_MODEL") or os.getenv("AI_MODEL") or "claude-opus-5-5"
     GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
-    # Used straight away when GEMINI_MODEL is overloaded ("503 high demand"); empty = none.
-    GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.1-flash-lite")
+    # Tried in turn (comma separated) when GEMINI_MODEL is overloaded ("503 high demand"); empty = none.
+    GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL",
+                                      "gemini-flash-lite-latest,gemini-3.1-flash-lite,gemini-3.5-flash")
+    # When every model is busy: wait this long, then try them all once more.
+    GEMINI_BUSY_PAUSE_SECONDS = float(os.getenv("GEMINI_BUSY_PAUSE_SECONDS", "3") or 3)
     # How much the model thinks before answering: minimal is fastest. Empty = model default.
     GEMINI_THINKING = os.getenv("GEMINI_THINKING", "minimal")
     # Give up on a Gemini request that hasn't answered in this many seconds (then the

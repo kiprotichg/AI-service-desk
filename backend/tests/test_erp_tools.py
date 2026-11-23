@@ -481,3 +481,25 @@ def test_several_lookups_run_together_and_keep_their_order(app, monkeypatch):
 
 def test_timeout_counts_as_overloaded():
     assert ai_service._is_overloaded(TimeoutError("The read operation timed out"))
+
+
+def test_backup_models_then_a_second_pass_when_all_are_busy(app, client, monkeypatch):
+    fake, looked_up, conv = _setup(app, monkeypatch, client, "jane@idealdynamics.co.ke")
+    app.config.update(GEMINI_FALLBACK_MODEL=" b1 , b2,m", GEMINI_BUSY_PAUSE_SECONDS=0)
+    with app.app_context():
+        assert ai_service._gemini_models() == ["m", "b1", "b2"]
+    real, tried = fake._stream, []
+
+    def busy_first_pass(**kw):
+        tried.append(kw["model"])
+        if len(tried) <= 3:
+            raise RuntimeError("503 UNAVAILABLE: high demand")
+        return real(**kw)
+
+    fake.models.generate_content_stream = busy_first_pass
+    res = client.post(f"/api/conversations/{conv['id']}/messages?stream=1",
+                      headers={"X-Conversation-Token": conv["token"]},
+                      json={"content": "How many services does Kenya Bank have?", "mode": "service"})
+    done = [json.loads(line) for line in res.get_data(as_text=True).splitlines()][-1]
+    assert tried[:4] == ["m", "b1", "b2", "m"]          # all three, then the main one again
+    assert done["reply"]["content"].startswith("Kenya Bank (C00309)")

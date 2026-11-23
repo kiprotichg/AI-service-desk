@@ -601,10 +601,15 @@ adds about 0.05 s.
     - `reset` (drop the half-written answer, if the model failed mid-way)
     - `done` (the same body as the normal reply)
     - or `error`
-- **Fallback model:** when `GEMINI_MODEL` answers "503 high demand", the app retries
-  briefly (0.5 s, then 1 s) and then switches to `GEMINI_FALLBACK_MODEL` (default
-  `gemini-3.1-flash-lite`; empty = none). Before, it waited through four slow retries,
-  which once took 15 s.
+- **Backup models:** when `GEMINI_MODEL` answers "503 high demand", the app retries it
+  once after 0.5 s, then tries each model in `GEMINI_FALLBACK_MODEL`, a comma-separated
+  list. The default is `gemini-flash-lite-latest,gemini-3.1-flash-lite,gemini-3.5-flash`;
+  leave it empty for none.
+- **When every model is busy:** the app waits `GEMINI_BUSY_PAUSE_SECONDS` (default 3)
+  and tries them all once more. Only then does the user get a "try again in a minute"
+  message.
+- **Hanging requests:** a request that hasn't answered within `GEMINI_TIMEOUT_SECONDS`
+  (default 25) is treated as busy.
 - **Thinking:** `GEMINI_THINKING=minimal` (the default) keeps the model's thinking short.
   Leave it empty for the model's default.
 - **Not streamed:** Regenerate and Edit, and Claude (`AI_PROVIDER=claude`), still

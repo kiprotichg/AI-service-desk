@@ -434,9 +434,12 @@ def _is_overloaded(exc):
 def _gemini_models():
     cfg = current_app.config
     models = [cfg["GEMINI_MODEL"]]
-    fallback = cfg.get("GEMINI_FALLBACK_MODEL")
-    if fallback and fallback not in models:
-        models.append(fallback)
+    # Comma separated: when one model is busy ("503 high demand"), the next is tried.
+    # Different model families have separate capacity, so one is usually free.
+    for name in (cfg.get("GEMINI_FALLBACK_MODEL") or "").split(","):
+        name = name.strip()
+        if name and name not in models:
+            models.append(name)
     return models
 
 
@@ -511,8 +514,13 @@ def _gemini_stream(history, user_turn, attachments, system, web_search, mode, us
     """
     from google.genai import types
     contents = _gemini_contents(history, user_turn, attachments)
-    models = _gemini_models()
+    # Every model once; if all are busy, a short pause and every model once more
+    # (Gemini's "high demand" spikes usually pass within seconds).
+    chain = _gemini_models()
+    models = chain * 2
     for i, model in enumerate(models):
+        if i == len(chain):
+            time.sleep(current_app.config.get("GEMINI_BUSY_PAUSE_SECONDS", 3))
         splitter, sources, started, used = _MetaSplitter(), [], False, []
         convo = list(contents)
         try:
@@ -746,7 +754,7 @@ def _get_gemini_client():
         # Gemini often answers 503 "high demand" for a moment; retry those (and rate
         # limits / other temporary server errors) briefly, then the fallback model
         # (GEMINI_FALLBACK_MODEL) takes over. Worst case adds about 0.5 + 1 seconds.
-        retry = types.HttpRetryOptions(attempts=3, initial_delay=0.5, max_delay=2.0,
+        retry = types.HttpRetryOptions(attempts=2, initial_delay=0.5, max_delay=2.0,
                                        exp_base=2.0, http_status_codes=[429, 500, 502, 503, 504])
         # A request that hangs (seen: 3 minutes before the first word) gives up after
         # GEMINI_TIMEOUT_SECONDS, and the fallback model answers instead.
