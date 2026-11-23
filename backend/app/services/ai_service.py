@@ -345,6 +345,13 @@ def stream_reply(history, user_message, attachments=(), mode="service", web_sear
             log.exception("gemini stream failed (web search %s)", "on" if search else "off")
             if started:
                 yield ("reset", None)
+    if lookups:
+        # A canned help article would look like an answer to an ERP question (e.g.
+        # "Show details for contract SC00146") without being one: say what happened.
+        reply = AIReply(reply=AI_BUSY_FOR_ERP, intent="general", source="offline")
+        yield ("delta", reply.reply)
+        yield ("done", reply)
+        return
     reply = _offline_reply(user_message, faqs, has_files=bool(attachments), mode=mode)
     if web_search:
         reply.notice = WEB_SEARCH_UNAVAILABLE
@@ -452,6 +459,8 @@ def _gemini_config(system, web_search, json_output=False, lookups=False, allow_c
 
 
 MAX_LOOKUP_ROUNDS = 3
+AI_BUSY_FOR_ERP = ("I couldn't look that up in the ERP just now: the AI service is busy or "
+                   "unavailable for a moment. Please send your question again in a minute.")
 ANSWER_NOW = ("Answer my question now using the ERP data the lookups above returned. Don't call "
               "any more lookups; if something is missing, say what you couldn't find.")
 
