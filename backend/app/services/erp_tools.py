@@ -722,13 +722,35 @@ EXAMPLE_QUESTIONS = [
 ]
 
 
-def gemini_tool():
+# Which lookups each answer mode may use. Service mode covers the service data (service
+# items, contracts, change history) and customers; Sales mode only customers. General
+# mode never looks anything up.
+SALES_LOOKUPS = {"find_customers", "blocked_customers", "customer_breakdown", "rank_customers",
+                 "customers_without_active_contract"}
+
+
+def lookups_for(mode):
+    if mode == "service":
+        return set(LOOKUPS)
+    if mode == "sales":
+        return set(SALES_LOOKUPS)
+    return set()
+
+
+def not_in_this_mode(name, mode):
+    """What the model gets back if it asks for a lookup that belongs to another mode."""
+    return {"error": f"{name} isn't available in {mode.title()} mode. Tell the user that "
+                     f"this is a Service question and to choose Service at the top of the chat."}
+
+
+def gemini_tool(mode="service"):
     from google.genai import types
+    allowed = lookups_for(mode)
     return types.Tool(function_declarations=[
         types.FunctionDeclaration(
             name=name, description=desc,
             parameters_json_schema={"type": "object", "properties": props, "required": required})
-        for name, (_fn, desc, props, required) in LOOKUPS.items()])
+        for name, (_fn, desc, props, required) in LOOKUPS.items() if name in allowed])
 
 
 def run_lookup(name, args):
@@ -752,18 +774,31 @@ def run_lookup(name, args):
         return {"error": f"The ERP database couldn't be reached right now ({type(exc).__name__})."}
 
 
-def instructions(app=None):
+def instructions(app=None, mode="service"):
     company = (app or current_app).config.get("ERP_COMPANY", "")
-    examples = "\n".join(f"- {q} -> {' + '.join(names)}" for q, names in EXAMPLE_QUESTIONS)
+    allowed = lookups_for(mode)
+    examples = "\n".join(f"- {q} -> {' + '.join(names)}" for q, names in EXAMPLE_QUESTIONS
+                         if set(names) <= allowed)
+    if mode == "sales":
+        scope = (f"Live ERP data: you can look up the company's customers in Dynamics NAV (company "
+                 f"{company}) with the provided functions: finding customers, blocked customers, "
+                 f"customer rankings and breakdowns (by city, salesperson, branch), and customers "
+                 f"without an active contract. This company's ERP data has no quotations, sales "
+                 f"orders or sales invoices, so say so if asked for them. Service items, guard "
+                 f"posts, alarms and service contracts belong to Service mode: if asked about "
+                 f"them, say it's a Service question and to choose Service at the top of the chat.")
+    else:
+        scope = (f"Live ERP data: you can look up the company's Dynamics NAV data (company {company}) "
+                 f"with the provided functions: customers, their service items (guard posts, alarm "
+                 f"services, cash in transit and other services), single service items and their "
+                 f"change history, totals per service group, service contracts (single ones, and "
+                 f"totals such as how many are active), blocked customers, customer rankings and "
+                 f"breakdowns (by city, salesperson, branch), service items at a place or site, "
+                 f"recent changes, contract trends, customers without an active contract, and gaps "
+                 f"in the data.")
     return f"""
 
-Live ERP data: you can look up the company's Dynamics NAV data (company {company}) with the
-provided functions: customers, their service items (guard posts, alarm services, cash in
-transit and other services), single service items and their change history, totals per
-service group, service contracts (single ones, and totals such as how many are active),
-blocked customers, customer rankings and breakdowns (by city, salesperson, branch), service
-items at a place or site, recent changes, contract trends, customers without an active
-contract, and gaps in the data. Use a lookup whenever the user asks about a specific
+{scope} Use a lookup whenever the user asks about a specific
 customer, service, contract, a count, a ranking or a comparison; never guess or invent ERP
 data. For harder questions, call several lookups (in the same turn when they don't depend
 on each other) and combine the results; do the arithmetic (totals, differences,

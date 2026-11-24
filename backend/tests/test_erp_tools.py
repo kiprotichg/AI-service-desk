@@ -469,13 +469,14 @@ def test_several_lookups_run_together_and_keep_their_order(app, monkeypatch):
         return {"name": name}
 
     monkeypatch.setattr(erp_tools, "run_lookup", slow)
-    calls = [SimpleNamespace(name=n, args={}, id=n) for n in ("a", "b", "c")]
+    names = ["find_customers", "blocked_customers", "rank_customers"]
+    calls = [SimpleNamespace(name=n, args={}, id=n) for n in names]
     used = []
     with app.app_context():
         start = _time.monotonic()
         parts = ai_service._lookup_responses(calls, used)
         took = _time.monotonic() - start
-    assert [p.function_response.name for p in parts] == ["a", "b", "c"] and used == ["a", "b", "c"]
+    assert [p.function_response.name for p in parts] == names and used == names
     assert len(threads) == 3 and took < 0.8   # together, not one after another (0.9 s)
 
 
@@ -503,3 +504,58 @@ def test_backup_models_then_a_second_pass_when_all_are_busy(app, client, monkeyp
     done = [json.loads(line) for line in res.get_data(as_text=True).splitlines()][-1]
     assert tried[:4] == ["m", "b1", "b2", "m"]          # all three, then the main one again
     assert done["reply"]["content"].startswith("Kenya Bank (C00309)")
+
+
+# ------------------------------------------------------------- roles per mode
+def test_each_mode_gets_only_its_own_lookups():
+    service = {d.name for d in erp_tools.gemini_tool(mode="service").function_declarations}
+    sales = {d.name for d in erp_tools.gemini_tool(mode="sales").function_declarations}
+    assert service == set(erp_tools.LOOKUPS)
+    assert sales == erp_tools.SALES_LOOKUPS and sales < service
+    assert not sales & {"customer_services", "service_item", "find_contracts", "contract_summary"}
+    assert erp_tools.lookups_for("general") == set()
+
+
+def test_sales_instructions_cover_customers_only(app):
+    app.config.update(ERP)
+    with app.app_context():
+        sales = erp_tools.instructions(mode="sales")
+        service = erp_tools.instructions(mode="service")
+    assert "no quotations, sales orders or sales invoices" in sales
+    assert "choose Service at the top of the chat" in sales
+    assert "services_at_location" not in sales and "services_at_location" in service
+
+
+def test_a_lookup_from_another_mode_is_refused(app, monkeypatch):
+    ran = []
+    monkeypatch.setattr(erp_tools, "run_lookup", lambda name, args: ran.append(name) or {"ok": 1})
+    calls = [SimpleNamespace(name="customer_services", args={"customer": "C1"}, id="1")]
+    used = []
+    with app.app_context():
+        parts = ai_service._lookup_responses(calls, used, "sales")
+    assert ran == [] and used == []
+    assert "Service" in parts[0].function_response.response["error"]
+
+
+def test_the_same_lookup_runs_once(app, monkeypatch):
+    ran = []
+    monkeypatch.setattr(erp_tools, "run_lookup", lambda name, args: ran.append(name) or {"n": 3})
+    call = lambda i: SimpleNamespace(name="blocked_customers", args={"limit": 5}, id=str(i))
+    used, cache = [], {}
+    with app.app_context():
+        first = ai_service._lookup_responses([call(1), call(2)], used, "sales", cache)
+        again = ai_service._lookup_responses([call(3)], used, "sales", cache)   # next round
+    assert ran == ["blocked_customers"] and used == ["blocked_customers"]
+    assert len(first) == 2 and again[0].function_response.response == {"n": 3}
+
+
+def test_prompts_give_each_mode_its_role():
+    p = ai_service.PROMPTS
+    assert "Service assistant of AI in Ideal" in p["service"]
+    assert "Sales assistant of AI in Ideal" in p["sales"]
+    assert "General assistant of AI in Ideal" in p["general"]
+    assert "That's a Sales question: choose Sales" in p["service"]
+    assert "That's a Service question" in p["sales"]
+    assert "choose General at the top of the chat" in p["service"]
+    assert "choose Service at the top of the chat" in p["general"]
+    assert "switch modes at the top of the chat" not in " ".join(p.values())

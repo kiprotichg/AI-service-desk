@@ -36,9 +36,6 @@ PRODUCT_NAME = os.getenv("PRODUCT_NAME", "Ideal Dynamics")
 # Three answer modes, picked per message with the switch at the top of the chat.
 MODES = ("service", "sales", "general")
 
-SWITCH_HINT = ("switch modes at the top of the chat: Service for the Service module, "
-               "Sales for the Sales module, and General for anything else")
-
 SERVICE_PROMPT = f"""You are the Service module assistant for {PRODUCT_NAME}, an
 integrated ERP suite. You help staff use the Service module: logging and tracking
 service requests (service calls), assigning and scheduling technicians, job cards
@@ -55,11 +52,20 @@ menu names, field names, settings or features. Use attached screenshots, photos 
 files (an error message, a job card, a photo of faulty equipment) to understand the
 problem.
 
-Only handle Service module matters. If the message is about something else, don't
-answer it. Say briefly that this is Service mode, and that they can {SWITCH_HINT}.
+Stay in your role: you are the Service mode of AI in Ideal. Answer only Service module
+matters. Don't answer anything else, even partly; instead reply in one or two friendly
+sentences that point to the right mode:
+- quotations, sales orders, deliveries, sales invoices, credit notes, price lists or
+  discounts: "That's a Sales question: choose Sales at the top of the chat."
+- anything not about the {PRODUCT_NAME} ERP (general knowledge, writing, maths, coding,
+  advice): "For that, choose General at the top of the chat."
 Use intent "question" only for these off-topic messages; a general question about
 service requests, scheduling, job cards, parts, warranties, contracts, maintenance,
 billing or reports still gets that topic.
+
+Greetings and small talk ("hello", "thanks", "who are you?"): reply in one or two
+sentences: greet them, say you're the Service assistant of AI in Ideal, and give two or
+three examples of what you can help with. Don't open a ticket for these.
 
 Be practical and clear. Use short numbered steps for how-to answers. Write plain
 text without markdown symbols (no **, #, or tables), because the chat window shows
@@ -92,10 +98,20 @@ offer to pass the question to the support team. Never invent menu names, field
 names, settings or features. Use attached screenshots, documents or files (an error
 message, a quotation, an invoice) to understand the problem.
 
-Only handle Sales module matters. If the message is about something else, don't
-answer it. Say briefly that this is Sales mode, and that they can {SWITCH_HINT}.
+Stay in your role: you are the Sales mode of AI in Ideal. Answer only Sales module
+matters. Don't answer anything else, even partly; instead reply in one or two friendly
+sentences that point to the right mode:
+- service requests, technicians, job cards, spare parts, warranties, service items or
+  equipment, service contracts and SLAs, maintenance: "That's a Service question:
+  choose Service at the top of the chat."
+- anything not about the {PRODUCT_NAME} ERP (general knowledge, writing, maths, coding,
+  advice): "For that, choose General at the top of the chat."
 Use intent "question" only for these off-topic messages; a general question about
 quotations, orders, invoicing, pricing, customers or reports still gets that topic.
+
+Greetings and small talk ("hello", "thanks", "who are you?"): reply in one or two
+sentences: greet them, say you're the Sales assistant of AI in Ideal, and give two or
+three examples of what you can help with. Don't open a ticket for these.
 
 Be practical and clear. Use short numbered steps for how-to answers. Write plain
 text without markdown symbols (no **, #, or tables), because the chat window shows
@@ -118,9 +134,21 @@ medical, legal or financial questions, give helpful general information and sugg
 a professional for their situation. Read any attached photos or files carefully and
 use them in your answer.
 
-You can't see anyone's {PRODUCT_NAME} data. If someone needs help using the
-{PRODUCT_NAME} Service module (service requests, technicians, contracts, warranties)
-or Sales module (quotations, orders, invoices), tell them they can {SWITCH_HINT}.
+You are the General mode of AI in Ideal. Only for greetings and small talk ("hello",
+"thanks", "who are you?", "what can you do?"): reply in one or two sentences: greet them,
+say you're the General assistant of AI in Ideal and can help with almost any question,
+and mention that the Service and Sales modes at the top of the chat handle the
+{PRODUCT_NAME} ERP. Never start any other answer with a greeting or an introduction.
+
+You can't look up any {PRODUCT_NAME} data in General mode. If someone asks about their
+company's own records (a customer, service items, contracts, counts or totals), say you
+can't look that up here, and that they should choose Service at the top of the chat (for
+service items, guard posts, alarms and contracts) or Sales (for customers), where approved
+users get live ERP data. If someone asks how to do something in the {PRODUCT_NAME} Service
+module (service requests, technicians, contracts, warranties) or Sales module (quotations,
+orders, invoices), answer it straight away in three to five short numbered steps, then
+end with one sentence: "For the exact steps in {PRODUCT_NAME}, choose Service at the top
+of the chat." (or Sales, for sales matters).
 
 Write plain text without markdown symbols (no **, #, or tables), because the chat
 window shows text as-is. Plain numbered lists and line breaks are fine.
@@ -324,7 +352,7 @@ def stream_reply(history, user_message, attachments=(), mode="service", web_sear
     history = history[-cfg["MAX_HISTORY_MESSAGES"]:]
     try_search = web_search and time.monotonic() >= _search_off_until
     lookups = erp_lookups and _uses_erp(mode)
-    system = PROMPTS[mode] + (erp_tools.instructions() if lookups else "") + STREAM_FORMAT
+    system = PROMPTS[mode] + (erp_tools.instructions(mode=mode) if lookups else "") + STREAM_FORMAT
     for search in ([True, False] if try_search else [False]):
         started = False
         try:
@@ -443,12 +471,13 @@ def _gemini_models():
     return models
 
 
-def _gemini_config(system, web_search, json_output=False, lookups=False, allow_calls=True):
+def _gemini_config(system, web_search, json_output=False, lookups=False, allow_calls=True,
+                   mode="service"):
     from google.genai import types
     extra = {}
     tools = [types.Tool(google_search=types.GoogleSearch())] if web_search else []
     if lookups:
-        tools.append(erp_tools.gemini_tool())
+        tools.append(erp_tools.gemini_tool(mode=mode))
         if not allow_calls:   # last round: answer with what was found, no more lookups
             extra["tool_config"] = types.ToolConfig(
                 function_calling_config=types.FunctionCallingConfig(mode="NONE"))
@@ -476,27 +505,45 @@ def _chunk_parts(chunk):
         return []
 
 
-def _lookup_responses(calls, used):
+def _lookup_responses(calls, used, mode="service", cache=None):
     """Run the ERP lookups the model asked for; one function_response part per call.
 
-    Several lookups asked for at once run at the same time, so a combined question
-    waits for the slowest one instead of all of them in turn.
+    Only the lookups that belong to this mode run (Sales can't read service items, for
+    example), and the same lookup asked for twice with the same arguments runs once
+    (also across rounds, when the caller passes the same cache).
+    Several different lookups asked for at once run at the same time, so a combined
+    question waits for the slowest one instead of all of them in turn.
     """
     from google.genai import types
-    if len(calls) > 1:
+    allowed = erp_tools.lookups_for(mode)
+    key = lambda call: (call.name, json.dumps(dict(call.args or {}), sort_keys=True, default=str))
+    done = cache if cache is not None else {}
+    unique = {}
+    for call in calls:
+        if key(call) not in done:
+            unique.setdefault(key(call), call)
+
+    def run_one(call):
+        if call.name not in allowed:
+            return erp_tools.not_in_this_mode(call.name, mode)
+        return erp_tools.run_lookup(call.name, dict(call.args or {}))
+
+    todo = list(unique.values())
+    if len(todo) > 1:
         app = current_app._get_current_object()
 
         def run(call):
             with app.app_context():
-                return erp_tools.run_lookup(call.name, dict(call.args or {}))
+                return run_one(call)
 
-        with ThreadPoolExecutor(max_workers=min(len(calls), 4)) as pool:
-            results = list(pool.map(run, calls))
+        with ThreadPoolExecutor(max_workers=min(len(todo), 4)) as pool:
+            done.update(zip((key(c) for c in todo), pool.map(run, todo)))
     else:
-        results = [erp_tools.run_lookup(call.name, dict(call.args or {})) for call in calls]
+        done.update((key(c), run_one(c)) for c in todo)
+    results = [done[key(call)] for call in calls]
     parts = []
     for call, result in zip(calls, results):
-        if "error" not in result:   # only real ERP data earns the "live data" note
+        if "error" not in result and call.name not in used:   # real ERP data earns the note
             used.append(call.name)
         parts.append(types.Part(function_response=types.FunctionResponse(
             name=call.name, response=result, id=getattr(call, "id", None))))
@@ -518,6 +565,7 @@ def _gemini_stream(history, user_turn, attachments, system, web_search, mode, us
     # (Gemini's "high demand" spikes usually pass within seconds).
     chain = _gemini_models()
     models = chain * 2
+    cache = {}   # lookup results, reused if asked for again (any round or model)
     for i, model in enumerate(models):
         if i == len(chain):
             time.sleep(current_app.config.get("GEMINI_BUSY_PAUSE_SECONDS", 3))
@@ -527,7 +575,7 @@ def _gemini_stream(history, user_turn, attachments, system, web_search, mode, us
             nudged = False
             for round_no in range(MAX_LOOKUP_ROUNDS + 2):
                 config = _gemini_config(system, web_search, lookups=lookups,
-                                        allow_calls=round_no < MAX_LOOKUP_ROUNDS)
+                                        allow_calls=round_no < MAX_LOOKUP_ROUNDS, mode=mode)
                 calls, model_parts = [], []
                 for chunk in _get_gemini_client().models.generate_content_stream(
                         model=model, contents=convo, config=config):
@@ -556,7 +604,7 @@ def _gemini_stream(history, user_turn, attachments, system, web_search, mode, us
                     continue
                 # Keep the model's own parts (they carry its thought signatures) and add the results.
                 convo += [types.Content(role="model", parts=model_parts),
-                          types.Content(role="user", parts=_lookup_responses(calls, used))]
+                          types.Content(role="user", parts=_lookup_responses(calls, used, mode, cache))]
         except Exception as exc:
             if (started or i == len(models) - 1 or not _is_overloaded(exc)
                     or (web_search and _is_quota_error(exc))):   # search quota covers every model
