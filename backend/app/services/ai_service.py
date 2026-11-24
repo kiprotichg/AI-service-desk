@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -362,6 +363,9 @@ def stream_reply(history, user_message, attachments=(), mode="service", web_sear
                 if kind == "delta":
                     started = True
                     yield ("delta", value)
+                elif kind == "reset":   # a model failed mid-answer; the next one starts over
+                    started = False
+                    yield ("reset", None)
                 else:
                     reply = value
             if web_search and not search:
@@ -459,6 +463,30 @@ def _is_overloaded(exc):
                                    "not found", "timeout", "timed out"))
 
 
+# Models that just failed, and until when (time.monotonic()) they're tried last. Without
+# this every message waits for the same busy model again before reaching one that works.
+_resting = {}
+_lock = threading.Lock()
+
+
+def _rest(model, exc):
+    """Put a failed model at the back of the queue for a while."""
+    text = str(exc).lower()
+    if "quota" in text:                          # free-tier quota: lasts a while
+        seconds = 600
+    elif "timeout" in text or "timed out" in text:
+        seconds = 120
+    else:                                        # 503 high demand, 429 rate limit, ...
+        seconds = 30
+    with _lock:
+        _resting[model] = time.monotonic() + seconds
+
+
+def _awake(model):
+    with _lock:
+        _resting.pop(model, None)
+
+
 def _gemini_models():
     cfg = current_app.config
     models = [cfg["GEMINI_MODEL"]]
@@ -468,7 +496,11 @@ def _gemini_models():
         name = name.strip()
         if name and name not in models:
             models.append(name)
-    return models
+    # Models that failed recently go last (still tried if all the others fail too).
+    now = time.monotonic()
+    with _lock:
+        tired = {m for m, until in _resting.items() if until > now}
+    return [m for m in models if m not in tired] + [m for m in models if m in tired]
 
 
 def _gemini_config(system, web_search, json_output=False, lookups=False, allow_calls=True,
@@ -606,11 +638,17 @@ def _gemini_stream(history, user_turn, attachments, system, web_search, mode, us
                 convo += [types.Content(role="model", parts=model_parts),
                           types.Content(role="user", parts=_lookup_responses(calls, used, mode, cache))]
         except Exception as exc:
-            if (started or i == len(models) - 1 or not _is_overloaded(exc)
+            if (i == len(models) - 1 or not _is_overloaded(exc)
                     or (web_search and _is_quota_error(exc))):   # search quota covers every model
                 raise
+            _rest(model, exc)
+            if started:
+                # Busy partway through the answer: clear what was shown and let the next
+                # model answer, instead of giving up on the AI altogether.
+                yield ("reset", None)
             log.warning("%s unavailable (%s); trying %s", model, str(exc)[:80], models[i + 1])
             continue
+        _awake(model)
         tail = splitter.close()
         if tail:
             yield ("delta", tail)
@@ -803,10 +841,10 @@ def _get_gemini_client():
         # limits / other temporary server errors) briefly, then the fallback model
         # (GEMINI_FALLBACK_MODEL) takes over. Worst case adds about 0.5 + 1 seconds.
         retry = types.HttpRetryOptions(attempts=2, initial_delay=0.5, max_delay=2.0,
-                                       exp_base=2.0, http_status_codes=[429, 500, 502, 503, 504])
+                                       exp_base=2.0, http_status_codes=[500, 502, 503, 504])
         # A request that hangs (seen: 3 minutes before the first word) gives up after
         # GEMINI_TIMEOUT_SECONDS, and the fallback model answers instead.
-        seconds = current_app.config.get("GEMINI_TIMEOUT_SECONDS", 25) if has_app_context() else 25
+        seconds = current_app.config.get("GEMINI_TIMEOUT_SECONDS", 15) if has_app_context() else 15
         timeout_ms = int(seconds * 1000)
         _gemini_client = genai.Client(  # reads GEMINI_API_KEY (or GOOGLE_API_KEY)
             http_options=types.HttpOptions(retry_options=retry, timeout=timeout_ms))
@@ -846,11 +884,13 @@ def _gemini_reply(history, user_turn, attachments=(), system=SERVICE_PROMPT, web
         try:
             response = _get_gemini_client().models.generate_content(
                 model=model, contents=contents, config=config)
+            _awake(model)
             break
         except Exception as exc:
             if (i == len(models) - 1 or not _is_overloaded(exc)
                     or (web_search and _is_quota_error(exc))):   # search quota covers every model
                 raise
+            _rest(model, exc)
             log.warning("%s unavailable (%s); trying %s", model, str(exc)[:80], models[i + 1])
     # A safety block (or any other stop without output) comes back with no text.
     if not response.text:

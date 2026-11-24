@@ -170,5 +170,6 @@ def test_gemini_client_retries_temporary_errors(monkeypatch):
     ai_service._get_gemini_client()
     retry = captured["http_options"].retry_options
     assert retry.attempts >= 2
-    assert {429, 503} <= set(retry.http_status_codes)
+    assert 503 in set(retry.http_status_codes)
+    assert 429 not in set(retry.http_status_codes)   # quota: the next model answers sooner
     monkeypatch.setattr(ai_service, "_gemini_client", None)  # don't leak the fake
