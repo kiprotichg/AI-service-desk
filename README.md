@@ -377,9 +377,8 @@ After signing in:
     separated, in `backend/.env` and on Render), or anyone already signed in with the
     agent login.
   - **Everyone else:** sees neither the Agent tools section nor "Agent sign in".
-  - **Admins open Tickets and Analytics directly** with their own account, with no
-    second sign-in. The separate agent login (`AGENT_USERNAME` / `AGENT_PASSWORD`) still
-    works for support staff without an admin account.
+  - **Admins still sign in** to Tickets and Analytics with the agent username and
+    password.
 
 ### Email confirmation
 

@@ -222,37 +222,3 @@ def test_agent_data_still_needs_the_agent_login(client):
     assert client.get("/api/tickets").status_code == 401
     assert client.get("/api/analytics").status_code == 401
 
-
-def _signed_in(client, email, password="Secret123"):
-    return {"X-User-Token": client.post("/api/users/login", json={"email": email, "password": password}
-                                        ).get_json()["token"]}
-
-
-def test_admins_open_staff_pages_with_their_own_account(app, client):
-    app.config["ADMIN_EMAILS"] = "boss@example.com"
-    _account(app, "boss@example.com", True)
-    _account(app, "staff@example.com", True)
-    boss, staff = _signed_in(client, "boss@example.com"), _signed_in(client, "staff@example.com")
-    for path in ("/api/tickets", "/api/analytics", "/api/conversations", "/api/auth/me"):
-        assert client.get(path, headers=boss).status_code == 200, path
-        assert client.get(path, headers=staff).status_code == 401, path   # ordinary users can't
-    assert client.get("/api/auth/me", headers=boss).get_json()["admin"] is True
-
-
-def test_removing_an_admin_takes_access_away(app, client):
-    app.config["ADMIN_EMAILS"] = "boss@example.com"
-    _account(app, "boss@example.com", True)
-    boss = _signed_in(client, "boss@example.com")
-    assert client.get("/api/tickets", headers=boss).status_code == 200
-    app.config["ADMIN_EMAILS"] = ""
-    assert client.get("/api/tickets", headers=boss).status_code == 401
-
-
-def test_unconfirmed_admin_address_gets_nothing(app, client):
-    app.config.update(ADMIN_EMAILS="boss@example.com", REQUIRE_EMAIL_VERIFICATION=False)
-    uid = _account(app, "boss@example.com", False)
-    app.config["REQUIRE_EMAIL_VERIFICATION"] = True
-    with app.app_context():
-        from app.auth import issue_user_token
-        token = issue_user_token(db.session.get(User, uid))
-    assert client.get("/api/tickets", headers={"X-User-Token": token}).status_code == 401

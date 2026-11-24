@@ -76,17 +76,13 @@ async function request(path, { method = "GET", body, headers = {}, raw = false,
 
 /** Request made as the logged-in agent; a 401 means the session expired. */
 async function agentRequest(path, options = {}) {
-  // Staff-only routes accept an agent sign-in, or an admin's own account (ADMIN_EMAILS).
   const token = session.get()?.token;
-  const userToken = userSession.get()?.token;
-  const headers = {
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    ...(userToken ? { "X-User-Token": userToken } : {}),
-  };
   try {
-    return await request(path, { ...options, headers });
+    return await request(path, {
+      ...options, headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
   } catch (err) {
-    if (err.status === 401 && token) {
+    if (err.status === 401) {
       session.clear();
       onAgentLogout();
     }

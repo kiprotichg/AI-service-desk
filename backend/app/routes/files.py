@@ -2,7 +2,7 @@ import os
 
 from flask import Blueprint, send_file
 
-from ..auth import is_staff, has_conversation_access, unauthorized
+from ..auth import current_agent, has_conversation_access, unauthorized
 from ..extensions import db
 from ..models import Attachment
 from ..services import attachments
@@ -14,7 +14,7 @@ bp = Blueprint("files", __name__, url_prefix="/api/attachments")
 def download(attachment_id):
     """Serve an uploaded file to the chat's customer or to an agent."""
     att = db.get_or_404(Attachment, attachment_id)
-    if not (has_conversation_access(att.message.conversation_id) or is_staff()):
+    if not (has_conversation_access(att.message.conversation_id) or current_agent()):
         return unauthorized()
     path = attachments.path_of(att)
     if not os.path.exists(path):

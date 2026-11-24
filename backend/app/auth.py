@@ -55,22 +55,10 @@ def current_agent():
     return g.agent
 
 
-def is_staff():
-    """True for a signed-in agent, or a signed-in admin account (ADMIN_EMAILS, confirmed).
-
-    Admins use their own account, so they don't need the separate agent login.
-    """
-    if current_agent() is not None:
-        return True
-    user = current_user()
-    return bool(user is not None and user.is_admin)
-
-
 def agent_required(view):
-    """Tickets, Analytics and other staff-only routes: agents and admin accounts."""
     @wraps(view)
     def wrapper(*args, **kwargs):
-        if not is_staff():
+        if current_agent() is None:
             return unauthorized()
         return view(*args, **kwargs)
     return wrapper

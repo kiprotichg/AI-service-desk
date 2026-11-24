@@ -1,7 +1,7 @@
 from flask import Blueprint, jsonify, request
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from ..auth import agent_required, current_agent, current_user, issue_agent_token, unauthorized
+from ..auth import agent_required, current_agent, issue_agent_token, unauthorized
 from ..models import Agent
 
 bp = Blueprint("auth", __name__, url_prefix="/api/auth")
@@ -28,8 +28,4 @@ def login():
 @bp.get("/me")
 @agent_required
 def me():
-    agent = current_agent()
-    if agent is not None:
-        return jsonify(agent.to_dict())
-    user = current_user()   # an admin account (agent_required let it through)
-    return jsonify({"id": None, "username": user.name, "admin": True})
+    return jsonify(current_agent().to_dict())
