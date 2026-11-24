@@ -56,6 +56,9 @@ class Config:
     ERP_COMPANY = os.getenv("ERP_COMPANY", "")          # e.g. IDEALDYNAMICS_PROP
     # New accounts must confirm their email with an emailed code before signing in.
     REQUIRE_EMAIL_VERIFICATION = os.getenv("REQUIRE_EMAIL_VERIFICATION", "true").lower() == "true"
+    # Accounts (comma-separated emails) that see the Agent tools (Tickets, Analytics).
+    # They still sign in to those with the agent login; everyone else never sees them.
+    ADMIN_EMAILS = os.getenv("ADMIN_EMAILS", "")
     # Only users whose email is at one of these domains get ERP lookups in chat
     # (comma separated, e.g. "idealdynamics.co.ke"). Empty = nobody.
     ERP_ALLOWED_EMAIL_DOMAINS = os.getenv("ERP_ALLOWED_EMAIL_DOMAINS", "")
@@ -111,6 +114,7 @@ class TestConfig(Config):
     ERP_DB_HOST = ERP_DB_NAME = ERP_DB_USER = ERP_DB_PASSWORD = ERP_COMPANY = ""
     ERP_ALLOWED_EMAIL_DOMAINS = ""
     ERP_ALLOWED_EMAILS = ""
+    ADMIN_EMAILS = ""
     # Most tests sign up and use the account straight away; test_verification.py turns it on.
     REQUIRE_EMAIL_VERIFICATION = False
     # Most tests exercise chat features without accounts; test_users.py turns it on.

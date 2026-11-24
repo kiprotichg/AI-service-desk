@@ -49,7 +49,7 @@ function ChatRow({ chat, active, onSelect, menuItems }) {
 
 export default function Sidebar({
   open, onToggle, chats, projects, activeId, view, onNewChat, onSelectChat, onOpenView,
-  chatMenuItems, projectMenuItems, onNewProject,
+  chatMenuItems, projectMenuItems, onNewProject, showAgentTools = false,
 }) {
   const [collapsed, setCollapsed] = useState({});   // project id -> true when folded
   const isActive = (c) => view === "chat" && c.id === activeId;
@@ -119,6 +119,7 @@ export default function Sidebar({
         <ul>{recent.map(row)}</ul>
       </nav>
 
+      {showAgentTools && (   /* admins only (ADMIN_EMAILS) or a signed-in agent */
       <div className="sidebar-bottom">
         <div className="list-label">Agent tools</div>
         <button className={`nav-item ${view === "tickets" ? "active" : ""}`}
@@ -130,6 +131,7 @@ export default function Sidebar({
           <ChartIcon width={18} height={18} /> Analytics
         </button>
       </div>
+      )}
     </aside>
   );
 }

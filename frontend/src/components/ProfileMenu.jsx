@@ -6,6 +6,7 @@ import { GearIcon, LoginIcon, LogoutIcon, UserIcon } from "./Icons.jsx";
  * tools sign-in/out, and Sign out of the account.
  */
 export default function ProfileMenu({ user, agent, name, onSettings, onSignOut, onAgentSignOut,
+  showAgentTools = false,
   onSignIn }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef(null);
@@ -61,7 +62,7 @@ export default function ProfileMenu({ user, agent, name, onSettings, onSignOut, 
             <button role="menuitem" className="menu-item" onClick={pick(onAgentSignOut)}>
               <LogoutIcon width={18} height={18} /> {user ? "Sign out of agent tools" : "Sign out"}
             </button>
-          ) : (
+          ) : showAgentTools && (
             <button role="menuitem" className="menu-item" onClick={pick(onSignIn)}>
               <LoginIcon width={18} height={18} /> Agent sign in
             </button>

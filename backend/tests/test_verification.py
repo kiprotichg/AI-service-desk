@@ -181,3 +181,43 @@ def test_email_is_logged_when_smtp_is_off(app, monkeypatch, caplog):
         c.post("/api/users/register", json={"name": "Jane", "email": "jane@idealdynamics.co.ke",
                                             "password": "Secret123"})
     assert "NOT sent" in caplog.text and "confirm this email" in caplog.text
+
+
+# ------------------------------------------------------------------- admins
+def _account(app, email, verified):
+    with app.app_context():
+        u = User(name="A", email=email, email_verified=verified)
+        u.set_password("Secret123")
+        db.session.add(u)
+        db.session.commit()
+        return u.id
+
+
+@pytest.mark.parametrize("email,verified,admin", [
+    ("boss@example.com", True, True),          # listed and confirmed
+    ("BOSS@Example.com", True, True),          # any case
+    ("boss@example.com", False, False),        # listed but not confirmed yet
+    ("staff@example.com", True, False),        # confirmed but not listed
+])
+def test_only_listed_confirmed_accounts_are_admins(app, email, verified, admin):
+    app.config["ADMIN_EMAILS"] = " boss@example.com , other@example.com"
+    uid = _account(app, email.lower(), verified)
+    with app.app_context():
+        u = db.session.get(User, uid)
+        assert u.is_admin is admin and u.to_dict()["is_admin"] is admin
+
+
+def test_me_reports_admin_flag(app, client, outbox):
+    app.config["ADMIN_EMAILS"] = "jane@idealdynamics.co.ke"
+    _register(client)
+    signed_in = client.post("/api/users/verify-email", json={"email": "jane@idealdynamics.co.ke",
+                                                             "code": _code(outbox[0])}).get_json()
+    assert signed_in["user"]["is_admin"] is True
+    app.config["ADMIN_EMAILS"] = ""
+    me = client.get("/api/users/me", headers={"X-User-Token": signed_in["token"]}).get_json()
+    assert me["is_admin"] is False
+
+
+def test_agent_data_still_needs_the_agent_login(client):
+    assert client.get("/api/tickets").status_code == 401
+    assert client.get("/api/analytics").status_code == 401

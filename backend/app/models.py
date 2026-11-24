@@ -1,6 +1,7 @@
 import json
 from datetime import datetime, timezone
 
+from flask import current_app
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from .extensions import db
@@ -47,9 +48,21 @@ class User(db.Model):
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
 
+    @property
+    def is_admin(self):
+        """Admins see the Agent tools (Tickets, Analytics) in the app. Set by ADMIN_EMAILS,
+        and only once the email is confirmed, so nobody can claim an admin's address."""
+        try:
+            cfg = current_app.config
+        except RuntimeError:   # outside the app (e.g. a plain script)
+            return False
+        admins = {e.strip().lower() for e in (cfg.get("ADMIN_EMAILS") or "").split(",") if "@" in e}
+        confirmed = self.email_verified or not cfg.get("REQUIRE_EMAIL_VERIFICATION", True)
+        return bool(confirmed) and (self.email or "").strip().lower() in admins
+
     def to_dict(self):
         return {"id": self.id, "name": self.name, "email": self.email,
-                "email_verified": bool(self.email_verified)}
+                "email_verified": bool(self.email_verified), "is_admin": self.is_admin}
 
 
 class PasswordReset(db.Model):

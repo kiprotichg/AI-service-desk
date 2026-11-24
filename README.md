@@ -372,6 +372,13 @@ After signing in:
   **Sign out**.
 - **Agents are separate:** the agent sign-in under Agent tools still guards Tickets
   and Analytics for support staff, so users can't see each other's tickets.
+- **Agent tools are only shown to admins:**
+  - **Who sees them:** accounts whose confirmed email is in `ADMIN_EMAILS` (comma
+    separated, in `backend/.env` and on Render), or anyone already signed in with the
+    agent login.
+  - **Everyone else:** sees neither the Agent tools section nor "Agent sign in".
+  - **Admins still sign in** to Tickets and Analytics with the agent username and
+    password.
 
 ### Email confirmation
 

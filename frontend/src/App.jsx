@@ -366,6 +366,9 @@ export default function App() {
   }
 
   const title = view === "tickets" ? "Tickets" : "Analytics";
+  // Agent tools (Tickets, Analytics) are only for admins (ADMIN_EMAILS on the server) or
+  // someone already signed in as an agent. Without accounts, they stay as before.
+  const showAgentTools = Boolean(agent || user?.is_admin || (config && !config.require_login));
   const helpdesk = config?.helpdesk ?? null;
   const displayName = user?.name || settings.name || agent?.username;
 
@@ -390,7 +393,7 @@ export default function App() {
         view={view} onNewChat={newChat} onSelectChat={selectChat}
         onOpenView={(v) => { setView(v); closeOnPhone(); }}
         projects={projects} chatMenuItems={chatMenuItems} projectMenuItems={projectMenuItems}
-        onNewProject={newProject}
+        onNewProject={newProject} showAgentTools={showAgentTools}
       />
       {sidebarOpen && <div className="backdrop" onClick={toggleSidebar} aria-hidden="true" />}
 
@@ -446,7 +449,7 @@ export default function App() {
               </button>
             )}
             <ThemeToggle theme={theme} onToggle={toggleTheme} />
-            <ProfileMenu user={user} agent={agent} name={settings.name}
+            <ProfileMenu user={user} agent={agent} name={settings.name} showAgentTools={showAgentTools}
               onSettings={() => setSettingsOpen(true)} onSignOut={resetAfterSignOut}
               onAgentSignOut={agentSignOut}
               onSignIn={() => { setView("tickets"); closeOnPhone(); }} />
