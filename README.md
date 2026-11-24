@@ -377,8 +377,9 @@ After signing in:
     separated, in `backend/.env` and on Render), or anyone already signed in with the
     agent login.
   - **Everyone else:** sees neither the Agent tools section nor "Agent sign in".
-  - **Admins still sign in** to Tickets and Analytics with the agent username and
-    password.
+  - **Admins open Tickets and Analytics directly** with their own account, with no
+    second sign-in. The separate agent login (`AGENT_USERNAME` / `AGENT_PASSWORD`) still
+    works for support staff without an admin account.
 
 ### Email confirmation
 
@@ -403,6 +404,26 @@ API: `POST /api/users/verify-email {email, code}` returns `{token, user}`, and
 `POST /api/users/resend-verification {email}` sends a new code. Registration answers
 `{verify_required: true, email, message}` instead of a token, and signing in to an
 unconfirmed account answers 403 with the same fields.
+
+### Sign-in codes (every sign-in)
+
+Every sign-in has two steps:
+1. **Email and password.** A wrong password gives the usual message, and no email is
+   sent.
+2. **A 6-digit sign-in code** is emailed to the account. Entering it signs you in.
+
+**Codes:** the same rules as the other codes. Each works once, for 15 minutes, with 5
+tries. A new one can be requested once a minute and replaces the old one, only a hash is
+stored, and reset or confirmation codes can't be used instead.
+
+**Resend code** signs in again with the same password, so a sign-in code is never sent
+for just an email address. Confirming a new account or resetting a password signs you in
+straight away, because those already came from a code in your inbox.
+
+**Turning it off:** set `REQUIRE_LOGIN_CODE=false` (in `backend/.env` and on Render).
+
+API: `POST /api/users/login` answers `202 {code_required, email, message}` instead of a
+token, then `POST /api/users/login-code {email, code}` returns `{token, user}`.
 
 ### Sending the reset emails
 

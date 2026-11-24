@@ -56,6 +56,8 @@ class Config:
     ERP_COMPANY = os.getenv("ERP_COMPANY", "")          # e.g. IDEALDYNAMICS_PROP
     # New accounts must confirm their email with an emailed code before signing in.
     REQUIRE_EMAIL_VERIFICATION = os.getenv("REQUIRE_EMAIL_VERIFICATION", "true").lower() == "true"
+    # Every sign-in needs a 6-digit code emailed to the account, after the password.
+    REQUIRE_LOGIN_CODE = os.getenv("REQUIRE_LOGIN_CODE", "true").lower() == "true"
     # Accounts (comma-separated emails) that see the Agent tools (Tickets, Analytics).
     # They still sign in to those with the agent login; everyone else never sees them.
     ADMIN_EMAILS = os.getenv("ADMIN_EMAILS", "")
@@ -117,6 +119,7 @@ class TestConfig(Config):
     ADMIN_EMAILS = ""
     # Most tests sign up and use the account straight away; test_verification.py turns it on.
     REQUIRE_EMAIL_VERIFICATION = False
+    REQUIRE_LOGIN_CODE = False   # test_login_code.py turns it on
     # Most tests exercise chat features without accounts; test_users.py turns it on.
     REQUIRE_USER_LOGIN = False
     SMTP_HOST = ""

@@ -221,6 +221,43 @@ def login():
     if _verification_on() and not user.email_verified:
         _send_verification(user)
         return _please_verify(user, 403, "Please confirm your email first.")
+    if current_app.config.get("REQUIRE_LOGIN_CODE", True):
+        # Second step: a code to the account's inbox. Only sent after the right password,
+        # so nobody can get a sign-in code with just an email address.
+        code = _issue_code(user, "login")
+        if code:
+            minutes = current_app.config["RESET_CODE_MINUTES"]
+            send_email(
+                user.email, "Your AI in Ideal sign-in code",
+                f"Hello {user.name},\n\n"
+                f"Your sign-in code is: {code}\n\n"
+                f"It expires in {minutes} minutes. If you didn't just try to sign in, someone may "
+                f"know your password: change it with \"Forgot password\" on the sign-in page.\n\n"
+                f"AI in Ideal")
+        else:
+            log.warning("Sign-in code for %s asked again within a minute: the earlier code "
+                        "still works, no new email sent.", _masked(user.email))
+        return jsonify({"code_required": True, "email": user.email,
+                        "message": f"We sent a 6-digit sign-in code to {user.email}."}), 202
+    return _signed_in(user)
+
+
+@bp.post("/login-code")
+def login_code():
+    """Second step of signing in: the code emailed after the right password."""
+    data = request.get_json(silent=True) or {}
+    email = _clean_email(data.get("email"))
+    code = re.sub(r"\s", "", str(data.get("code") or ""))
+    user = User.query.filter_by(email=email, is_active=True).first() if email else None
+    entry = _open_code(user, "login", code)
+    if entry is None:
+        return _error(WRONG_CODE)
+    problem = _wrong_code(entry, user, code)
+    if problem:
+        return problem
+    entry.used = True
+    user.email_verified = True   # the code reached their inbox
+    db.session.commit()
     return _signed_in(user)
 
 

@@ -369,6 +369,8 @@ export default function App() {
   // Agent tools (Tickets, Analytics) are only for admins (ADMIN_EMAILS on the server) or
   // someone already signed in as an agent. Without accounts, they stay as before.
   const showAgentTools = Boolean(agent || user?.is_admin || (config && !config.require_login));
+  // Admins open Tickets and Analytics with their own account; others need the agent login.
+  const staff = Boolean(agent || user?.is_admin);
   const helpdesk = config?.helpdesk ?? null;
   const displayName = user?.name || settings.name || agent?.username;
 
@@ -449,7 +451,8 @@ export default function App() {
               </button>
             )}
             <ThemeToggle theme={theme} onToggle={toggleTheme} />
-            <ProfileMenu user={user} agent={agent} name={settings.name} showAgentTools={showAgentTools}
+            <ProfileMenu user={user} agent={agent} name={settings.name}
+              showAgentTools={showAgentTools && !user?.is_admin}
               onSettings={() => setSettingsOpen(true)} onSignOut={resetAfterSignOut}
               onAgentSignOut={agentSignOut}
               onSignIn={() => { setView("tickets"); closeOnPhone(); }} />
@@ -471,9 +474,9 @@ export default function App() {
         )}
         {view !== "chat" && (
           <div className="panel-wrap">
-            {!agent && <LoginForm onLogin={handleLogin} />}
-            {agent && view === "tickets" && <TicketsPanel />}
-            {agent && view === "analytics" && <AnalyticsPanel />}
+            {!staff && <LoginForm onLogin={handleLogin} />}
+            {staff && view === "tickets" && <TicketsPanel />}
+            {staff && view === "analytics" && <AnalyticsPanel />}
           </div>
         )}
       </div>

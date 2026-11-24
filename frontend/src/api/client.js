@@ -76,13 +76,17 @@ async function request(path, { method = "GET", body, headers = {}, raw = false,
 
 /** Request made as the logged-in agent; a 401 means the session expired. */
 async function agentRequest(path, options = {}) {
+  // Staff-only routes accept an agent sign-in, or an admin's own account (ADMIN_EMAILS).
   const token = session.get()?.token;
+  const userToken = userSession.get()?.token;
+  const headers = {
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(userToken ? { "X-User-Token": userToken } : {}),
+  };
   try {
-    return await request(path, {
-      ...options, headers: token ? { Authorization: `Bearer ${token}` } : {},
-    });
+    return await request(path, { ...options, headers });
   } catch (err) {
-    if (err.status === 401) {
+    if (err.status === 401 && token) {
       session.clear();
       onAgentLogout();
     }
@@ -123,6 +127,9 @@ export const api = {
   resetPassword: (email, code, password) =>
     request("/users/reset-password", { method: "POST", body: { email, code, password } }),
   /** Confirm the email with the emailed code; returns {token, user}. */
+  /** Second step of signing in: the code emailed after the right password. */
+  loginCode: (email, code) =>
+    request("/users/login-code", { method: "POST", body: { email, code } }),
   verifyEmail: (email, code) =>
     request("/users/verify-email", { method: "POST", body: { email, code } }),
   resendVerification: (email) =>

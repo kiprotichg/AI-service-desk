@@ -5,7 +5,7 @@ from datetime import timedelta
 
 from flask import Blueprint, current_app, jsonify, request, stream_with_context
 
-from ..auth import (agent_required, current_agent, current_user, has_conversation_access,
+from ..auth import (agent_required, is_staff, current_user, has_conversation_access,
                     issue_conversation_token, unauthorized)
 from ..extensions import db
 from ..models import Conversation, Message, Project, Ticket, User, utcnow
@@ -50,7 +50,7 @@ def list_conversations():
 
 @bp.get("/<int:conv_id>")
 def get_conversation(conv_id):
-    if not (has_conversation_access(conv_id) or current_agent()):
+    if not (has_conversation_access(conv_id) or is_staff()):
         return unauthorized()
     conv = db.get_or_404(Conversation, conv_id)
     return jsonify(conv.to_dict(with_messages=True))
@@ -334,7 +334,7 @@ def _apply_service_details(ticket, ai, bot_msg):
 
 @bp.post("/<int:conv_id>/close")
 def close_conversation(conv_id):
-    if not (has_conversation_access(conv_id) or current_agent()):
+    if not (has_conversation_access(conv_id) or is_staff()):
         return unauthorized()
     conv = db.get_or_404(Conversation, conv_id)
     conv.status = "closed"
@@ -345,7 +345,7 @@ def close_conversation(conv_id):
 @bp.delete("/<int:conv_id>")
 def delete_conversation(conv_id):
     """Delete a chat, its messages and uploaded files. Tickets stay for the agents."""
-    if not (has_conversation_access(conv_id) or current_agent()):
+    if not (has_conversation_access(conv_id) or is_staff()):
         return unauthorized()
     _delete_chat(db.get_or_404(Conversation, conv_id))
     return "", 204
