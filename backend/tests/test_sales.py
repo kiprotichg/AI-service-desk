@@ -149,7 +149,7 @@ def test_sales_intents_are_accepted(app, client, monkeypatch):
     for intent in ai_service.SALES_INTENTS:
         _live(app, monkeypatch, intent=intent)
         conv, h = _conv(client, mode="sales")
-        assert _say(client, conv, h, "hi")["user_message"]["intent"] == intent
+        assert _say(client, conv, h, "a question about my order")["user_message"]["intent"] == intent
 
 
 # -------------------------------------------------------------------- offline

@@ -224,6 +224,9 @@ def generate_reply(history, user_message, attachments=(), mode="service", web_se
     """
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
+    quick = quick_reply(user_message, mode, attachments)
+    if quick:
+        return quick
     if erp_lookups and _uses_erp(mode):
         reply = None
         for kind, value in stream_reply(history, user_message, attachments, mode, web_search,
@@ -338,6 +341,11 @@ def stream_reply(history, user_message, attachments=(), mode="service", web_sear
     """
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
+    quick = quick_reply(user_message, mode, attachments)
+    if quick:
+        yield ("delta", quick.reply)
+        yield ("done", quick)
+        return
     cfg = current_app.config
     if not (cfg["AI_ENABLED"] and cfg["AI_PROVIDER"] == "gemini"):
         reply = generate_reply(history, user_message, attachments, mode, web_search)  # no lookups
@@ -362,6 +370,9 @@ def stream_reply(history, user_message, attachments=(), mode="service", web_sear
                 if kind == "delta":
                     started = True
                     yield ("delta", value)
+                elif kind == "reset":
+                    started = False
+                    yield ("reset", None)
                 else:
                     reply = value
             if web_search and not search:
@@ -377,7 +388,7 @@ def stream_reply(history, user_message, attachments=(), mode="service", web_sear
     if lookups:
         # A canned help article would look like an answer to an ERP question (e.g.
         # "Show details for contract SC00146") without being one: say what happened.
-        reply = AIReply(reply=AI_BUSY_FOR_ERP, intent="general", source="offline")
+        reply = AIReply(reply=AI_BUSY, intent="general", source="offline")
         yield ("delta", reply.reply)
         yield ("done", reply)
         return
@@ -452,11 +463,31 @@ def _reply_from_stream(text, meta, mode, user_message, source):
 
 
 def _is_overloaded(exc):
-    """Errors where another model is worth trying: busy, rate limited, unavailable."""
+    """Errors where another model is worth trying: busy, rate limited, unavailable,
+    or the connection dropped."""
     text = str(exc).lower()
     return any(s in text for s in ("503", "unavailable", "high demand", "overloaded",
                                    "429", "resource_exhausted", "500", "internal", "404",
-                                   "not found", "timeout", "timed out"))
+                                   "not found", "timeout", "timed out", "disconnect",
+                                   "connection", "remoteprotocol", "incomplete", "eof"))
+
+
+_RETRY_DELAY = re.compile(r"retry(?:Delay'?\s*:\s*'|\s+in\s+)(\d+(?:\.\d+)?)\s*s", re.I)
+
+
+def _retry_delay(exc):
+    """Seconds Gemini asks us to wait after a rate limit ("Please retry in 37.2s"), or 0."""
+    m = _RETRY_DELAY.search(str(exc))
+    return float(m.group(1)) if m else 0.0
+
+
+def _busy_pause(retry_after):
+    """How long to wait before trying every model again."""
+    cfg = current_app.config
+    pause = cfg.get("GEMINI_BUSY_PAUSE_SECONDS", 3)
+    if 0 < retry_after <= cfg.get("GEMINI_MAX_RETRY_WAIT_SECONDS", 20):
+        pause = max(pause, retry_after + 0.5)   # a rate limit that clears soon: wait it out
+    return pause
 
 
 def _gemini_models():
@@ -492,8 +523,8 @@ def _gemini_config(system, web_search, json_output=False, lookups=False, allow_c
 
 
 MAX_LOOKUP_ROUNDS = 3
-AI_BUSY_FOR_ERP = ("I couldn't look that up in the ERP just now: the AI service is busy or "
-                   "unavailable for a moment. Please send your question again in a minute.")
+AI_BUSY = ("Sorry, the AI service is very busy right now, so I couldn't answer that. Please "
+           "send your message again in a minute.")
 ANSWER_NOW = ("Answer my question now using the ERP data the lookups above returned. Don't call "
               "any more lookups; if something is missing, say what you couldn't find.")
 
@@ -553,7 +584,7 @@ def _lookup_responses(calls, used, mode="service", cache=None):
 def _gemini_stream(history, user_turn, attachments, system, web_search, mode, user_message,
                    lookups=False):
     """Yield ("delta", text)... then ("reply", AIReply). Tries the fallback model if the
-    main one is overloaded before it has written anything.
+    main one is overloaded (if it breaks off mid-answer, ("reset", None) comes first).
 
     With lookups, the model may ask for ERP data first: those calls are run, their
     results added to the conversation, and the model asked again (at most
@@ -566,9 +597,10 @@ def _gemini_stream(history, user_turn, attachments, system, web_search, mode, us
     chain = _gemini_models()
     models = chain * 2
     cache = {}   # lookup results, reused if asked for again (any round or model)
+    retry_after = 0.0   # longest "retry in N s" Gemini gave on the first pass
     for i, model in enumerate(models):
         if i == len(chain):
-            time.sleep(current_app.config.get("GEMINI_BUSY_PAUSE_SECONDS", 3))
+            time.sleep(_busy_pause(retry_after))
         splitter, sources, started, used = _MetaSplitter(), [], False, []
         convo = list(contents)
         try:
@@ -606,9 +638,14 @@ def _gemini_stream(history, user_turn, attachments, system, web_search, mode, us
                 convo += [types.Content(role="model", parts=model_parts),
                           types.Content(role="user", parts=_lookup_responses(calls, used, mode, cache))]
         except Exception as exc:
-            if (started or i == len(models) - 1 or not _is_overloaded(exc)
+            if (i == len(models) - 1 or not _is_overloaded(exc)
                     or (web_search and _is_quota_error(exc))):   # search quota covers every model
                 raise
+            if started:
+                # It broke off halfway ("503 high demand" mid-answer): drop the half-written
+                # text and let the next model write the whole answer.
+                yield ("reset", None)
+            retry_after = max(retry_after, _retry_delay(exc))
             log.warning("%s unavailable (%s); trying %s", model, str(exc)[:80], models[i + 1])
             continue
         tail = splitter.close()
@@ -981,6 +1018,57 @@ def _offline_suggestions(intent, mode):
     if not table:
         return []  # General mode can't answer anything offline, so offer nothing
     return [_S[k] for k in table.get(intent, table["_default"])]
+
+
+# Greetings, thanks and "who are you?" get an instant built-in answer: no AI request, so
+# they work even when Gemini is busy or its free quota is used up, and save that quota
+# for real questions.
+_GREETING = re.compile(
+    r"^(?:(?:hi|hello|hey|hallo|helo|hi there|hello there|hey there|greetings|good (?:morning|"
+    r"afternoon|evening|day)|habari|mambo|niaje|sasa|jambo)(?: (?:ai|there|team|everyone|friend))?)$")
+_THANKS = re.compile(r"^(?:(?:ok(?:ay)? )?(?:thanks?|thank you|thx|asante)(?: (?:so much|a lot|"
+                     r"very much|sana))?|(?:ok(?:ay)?|great|cool|nice|perfect) thanks?)$")
+_WHO = re.compile(r"^(?:who are you|what are you|what can you do|what can you help (?:me )?with|"
+                  r"how can you help(?: me)?|what do you do|help)$")
+
+_QUICK = {
+    "service": ("I'm the Service assistant of AI in Ideal. I can help with service requests, "
+                "technicians and job cards, service contracts and warranties, and for approved "
+                "users I can look up live ERP data such as a customer's service items or how "
+                "many contracts are active.",
+                ["How do I log a new service request?", "How many contracts are active?",
+                 "What services does customer C00001 have?"]),
+    "sales": ("I'm the Sales assistant of AI in Ideal. I can help with quotations, sales "
+              "orders, invoices, pricing and customers, and for approved users I can look up "
+              "live ERP data such as blocked customers or customers by city.",
+              ["How do I create a sales quotation?", "How many customers are blocked?",
+               "Which customers have no active contract?"]),
+    "general": ("I'm the General assistant of AI in Ideal. Ask me almost anything: facts, "
+                "writing, maths, coding or advice. For the Ideal Dynamics ERP, choose Service "
+                "or Sales at the top of the chat.",
+                ["Help me write a professional email", "Explain a topic in simple words",
+                 "Give me tips for a job interview"]),
+}
+
+
+def quick_reply(user_message, mode, attachments=()):
+    """The instant answer to a greeting, thanks or "who are you?", or None."""
+    if attachments or mode not in _QUICK:
+        return None
+    text = _norm(user_message)
+    about, suggestions = _QUICK[mode]
+    thanks = bool(_THANKS.match(text))
+    if _GREETING.match(text):
+        reply = "Hello! " + about
+    elif _WHO.match(text):
+        reply = about
+    elif thanks:
+        reply = "You're welcome! Is there anything else I can help you with?"
+    else:
+        return None
+    return AIReply(reply=reply, intent="question" if mode == "general" else "general",
+                   sentiment="positive" if thanks else "neutral",
+                   suggestions=list(suggestions), source="quick")
 
 
 def _offline_reply(user_message, faqs, has_files=False, mode="service"):

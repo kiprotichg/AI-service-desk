@@ -49,7 +49,7 @@ class FakeGemini:
         def gen():
             for i, p in enumerate(self.pieces):
                 if self.fail_after is not None and i == self.fail_after:
-                    raise RuntimeError("connection reset")
+                    raise RuntimeError("400 INVALID_ARGUMENT")   # not worth another model
                 yield SimpleNamespace(text=p, candidates=[])
         return gen()
 
@@ -160,3 +160,32 @@ def test_meta_splitter_holds_back_a_partial_tag():
     assert s.feed('a>{"intent": "general"}</meta>') == ""
     assert s.close() == "" and s.meta() == {"intent": "general"}
     assert s.visible == "Answer <b>bold</b> end"
+
+
+def test_busy_mid_answer_switches_to_the_fallback(app, client, monkeypatch):
+    fake = FakeGemini(["Half an ans", "wer.", '<meta>{"intent": "question"}</meta>'])
+    real = fake._stream
+
+    def breaks_on_main(**kw):
+        if kw["model"] != "main-model":
+            return real(**kw)
+        fake.calls.append(kw)
+
+        def gen():
+            yield SimpleNamespace(text="Half an ans", candidates=[])
+            raise RuntimeError("503 UNAVAILABLE. This model is currently experiencing high demand.")
+        return gen()
+    fake.models.generate_content_stream = breaks_on_main
+    _use(app, monkeypatch, fake)
+    _, _, events = _stream(client, "Why is the sky blue?", mode="general")
+    kinds = [e["type"] for e in events]
+    assert [c["model"] for c in fake.calls] == ["main-model", "backup-model"]
+    assert kinds.count("reset") == 1 and events[-1]["source"] == "gemini"
+    after = "".join(e["text"] for e in events[kinds.index("reset"):] if e["type"] == "delta")
+    assert after == events[-1]["reply"]["content"] == "Half an answer."
+
+
+def test_dropped_connection_counts_as_busy():
+    assert ai_service._is_overloaded(RuntimeError("Server disconnected without sending a response."))
+    assert ai_service._is_overloaded(RuntimeError("peer closed connection without sending body"))
+    assert not ai_service._is_overloaded(RuntimeError("400 INVALID_ARGUMENT"))

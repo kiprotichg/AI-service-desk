@@ -262,7 +262,7 @@ def test_busy_model_gives_a_clear_message_not_a_canned_article(app, client, monk
                       headers={"X-Conversation-Token": conv["token"]},
                       json={"content": "Show details for contract SC90146", "mode": "service"})
     done = [json.loads(line) for line in res.get_data(as_text=True).splitlines()][-1]
-    assert done["reply"]["content"] == ai_service.AI_BUSY_FOR_ERP and looked_up == []
+    assert done["reply"]["content"] == ai_service.AI_BUSY and looked_up == []
 
 
 @pytest.mark.parametrize("stored,shown", [
@@ -559,3 +559,41 @@ def test_prompts_give_each_mode_its_role():
     assert "choose General at the top of the chat" in p["service"]
     assert "choose Service at the top of the chat" in p["general"]
     assert "switch modes at the top of the chat" not in " ".join(p.values())
+
+
+# ------------------------------------------------- busy Gemini, instant replies
+def test_greetings_are_answered_without_the_ai(app, monkeypatch):
+    def no_ai(*a, **kw):
+        raise AssertionError("Gemini should not be called for a greeting")
+    monkeypatch.setattr(ai_service, "_get_gemini_client", no_ai)
+    app.config.update(AI_ENABLED=True, AI_PROVIDER="gemini")
+    with app.app_context():
+        for mode, who in (("service", "Service"), ("sales", "Sales"), ("general", "General")):
+            events = list(ai_service.stream_reply([], "Hello!", mode=mode, erp_lookups=True))
+            reply = events[-1][1]
+            assert reply.reply.startswith("Hello! I'm the " + who + " assistant")
+            assert len(reply.suggestions) == 3 and reply.source == "quick"
+        assert ai_service.generate_reply([], "thank you", mode="sales").reply.startswith("You're welcome")
+        assert ai_service.quick_reply("What can you do?", "service")
+
+
+def test_real_questions_still_go_to_the_ai():
+    for text in ("hello, how many customers are blocked?", "How do I log a service request?",
+                 "thanks but that is wrong", "hi C00309"):
+        assert ai_service.quick_reply(text, "service") is None
+    assert ai_service.quick_reply("hello", "service", attachments=["photo"]) is None
+
+
+def test_a_short_rate_limit_is_waited_out(app):
+    exc = RuntimeError("429 RESOURCE_EXHAUSTED. Please retry in 12.5s. {'retryDelay': '12s'}")
+    assert ai_service._retry_delay(exc) == 12.5
+    assert ai_service._retry_delay(RuntimeError("503 UNAVAILABLE")) == 0
+    app.config.update(GEMINI_BUSY_PAUSE_SECONDS=3, GEMINI_MAX_RETRY_WAIT_SECONDS=20)
+    with app.app_context():
+        assert ai_service._busy_pause(12.5) == 13.0
+        assert ai_service._busy_pause(0) == 3
+        assert ai_service._busy_pause(3600) == 3   # daily quota: waiting won't help
+
+
+def test_busy_message_does_not_blame_the_erp():
+    assert "ERP" not in ai_service.AI_BUSY and "again in a minute" in ai_service.AI_BUSY

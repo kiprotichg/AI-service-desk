@@ -37,9 +37,13 @@ class Config:
     GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
     # Tried in turn (comma separated) when GEMINI_MODEL is overloaded ("503 high demand"); empty = none.
     GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL",
-                                      "gemini-flash-lite-latest,gemini-3.1-flash-lite,gemini-3.5-flash")
+                                      "gemini-flash-lite-latest,gemini-3.1-flash-lite,gemini-3.5-flash,"
+                                      "gemma-4-31b-it")
     # When every model is busy: wait this long, then try them all once more.
     GEMINI_BUSY_PAUSE_SECONDS = float(os.getenv("GEMINI_BUSY_PAUSE_SECONDS", "3") or 3)
+    # If Gemini says "too many requests, retry in N seconds" (free tier: a few requests a
+    # minute), wait up to this long for that instead, then try again.
+    GEMINI_MAX_RETRY_WAIT_SECONDS = float(os.getenv("GEMINI_MAX_RETRY_WAIT_SECONDS", "20") or 0)
     # How much the model thinks before answering: minimal is fastest. Empty = model default.
     GEMINI_THINKING = os.getenv("GEMINI_THINKING", "minimal")
     # Give up on a Gemini request that hasn't answered in this many seconds (then the
