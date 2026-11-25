@@ -595,6 +595,105 @@ def data_quality():
     return {"service_items": first(items), "customers": first(customers), "contracts": first(contracts)}
 
 
+_DATE_ARG = re.compile(r"^\s*(\d{4})-(\d{1,2})(?:-(\d{1,2}))?\s*$")
+
+
+def _date_arg(text, end=False):
+    """A date from the model's argument ("2026-03-15", or "2026-03" for that month), or None."""
+    m = _DATE_ARG.match(str(text or ""))
+    if not m:
+        return None
+    y, mo = int(m.group(1)), int(m.group(2))
+    try:
+        if m.group(3):
+            return dt.date(y, mo, int(m.group(3)))
+        if end:   # last day of the month
+            return dt.date(y + mo // 12, mo % 12 + 1, 1) - dt.timedelta(days=1)
+        return dt.date(y, mo, 1)
+    except ValueError:
+        return None
+
+
+def contract_billing(contract_no="", customer_no="", date_from="", date_to=""):
+    """What was invoiced on service contracts (posted contract invoices in the Service
+    Ledger Entry table): totals for one contract, one customer or all of them, per month,
+    the top contracts, and the invoices themselves."""
+    start = _date_arg(date_from) or dt.date(1753, 1, 2)
+    end = _date_arg(date_to, end=True) or dt.date(9999, 12, 31)
+    params = {"c": (contract_no or "").strip().upper(), "cu": (customer_no or "").strip().upper(),
+              "df": start, "dt": end}
+    # Entry Type 1 = sale (what was invoiced). Sales are stored as negative amounts.
+    base = (f"FROM {_t('Service Ledger Entry')} s "
+            f"WHERE s.[Entry Type] = 1 AND (:c = '' OR s.[Service Contract No_] = :c) "
+            f"AND (:cu = '' OR s.[Customer No_] = :cu) "
+            f"AND s.[Posting Date] >= :df AND s.[Posting Date] <= :dt ")
+    totals = erp.query(
+        f"SELECT COUNT(DISTINCT s.[Document No_]) AS invoice_count, -SUM(s.[Amount (LCY)]) AS amount_invoiced, "
+        f"COUNT(DISTINCT s.[Service Contract No_]) AS contracts, COUNT(DISTINCT s.[Customer No_]) AS customers, "
+        f"MIN(s.[Posting Date]) AS first_invoice, MAX(s.[Posting Date]) AS last_invoice {base}", params)
+    per_month = erp.query(
+        f"SELECT TOP 24 YEAR(s.[Posting Date]) AS y, MONTH(s.[Posting Date]) AS mo, "
+        f"COUNT(DISTINCT s.[Document No_]) AS invoices, -SUM(s.[Amount (LCY)]) AS amount_invoiced {base}"
+        f"GROUP BY YEAR(s.[Posting Date]), MONTH(s.[Posting Date]) ORDER BY y DESC, mo DESC", params)
+    out = {"contract_no": params["c"] or None, "customer_no": params["cu"] or None,
+           "date_from": _clean(start) if date_from else None, "date_to": _clean(end) if date_to else None,
+           **(_rows(totals)[0] if totals else {}),
+           "per_month": [{"month": f"{r['y']:04d}-{r['mo']:02d}", "invoices": r["invoices"],
+                          "amount_invoiced": _clean(r["amount_invoiced"])} for r in reversed(per_month)]}
+    if not params["c"]:
+        top = erp.query(
+            f"SELECT TOP 10 s.[Service Contract No_] AS contract_no, MAX(s.[Customer No_]) AS customer_no, "
+            f"MAX(c.[Name]) AS customer_name, COUNT(DISTINCT s.[Document No_]) AS invoices, "
+            f"-SUM(s.[Amount (LCY)]) AS amount_invoiced, MAX(s.[Posting Date]) AS last_invoice "
+            f"{base.replace('WHERE', 'LEFT JOIN ' + _t('Customer') + ' c ON c.[No_] = s.[Customer No_] WHERE', 1)}"
+            f"GROUP BY s.[Service Contract No_] ORDER BY amount_invoiced DESC", params)
+        out["top_contracts"] = _rows(top)
+    if params["c"] or params["cu"]:
+        invoices = erp.query(
+            f"SELECT TOP 40 s.[Posting Date] AS date, s.[Document No_] AS invoice_no, "
+            f"s.[Service Contract No_] AS contract_no, -SUM(s.[Amount (LCY)]) AS amount, "
+            f"MAX(s.[Contract Invoice Period]) AS invoice_period {base}"
+            f"GROUP BY s.[Posting Date], s.[Document No_], s.[Service Contract No_] "
+            f"ORDER BY s.[Posting Date] DESC", params)
+        out["invoices"] = _rows(invoices)
+    if not (totals and totals[0]["invoice_count"]):
+        out["note"] = "No posted contract invoices match this."
+    return out
+
+
+def staff_roster(date_from="", date_to="", group=""):
+    """Staff rostered on service time sheets (Time Sheet Detail) for a date range: how many
+    people, shifts and hours, per resource group and per day. Counts only, no names."""
+    today = dt.date.today()
+    start = _date_arg(date_from) or today
+    end = _date_arg(date_to, end=True) or (start + dt.timedelta(days=6))
+    if end < start:
+        start, end = end, start
+    end = min(end, start + dt.timedelta(days=92))
+    params = {"df": start, "dt": end, "g": (group or "").strip().upper()}
+    base = (f"FROM {_t('Time Sheet Detail')} d WHERE d.[Date] >= :df AND d.[Date] <= :dt "
+            f"AND (:g = '' OR UPPER(d.[Resource Group]) = :g) ")
+    totals = erp.query(
+        f"SELECT COUNT(DISTINCT d.[Resource No_]) AS staff, {_flag('d.[Quantity] > 0')} AS shifts, "
+        f"SUM(d.[Quantity]) AS hours {base}", params)
+    per_group = erp.query(
+        f"SELECT TOP 20 d.[Resource Group] AS resource_group, COUNT(DISTINCT d.[Resource No_]) AS staff, "
+        f"SUM(d.[Quantity]) AS hours {base}GROUP BY d.[Resource Group] ORDER BY staff DESC", params)
+    per_day = erp.query(
+        f"SELECT TOP 31 CAST(d.[Date] AS date) AS day, COUNT(DISTINCT d.[Resource No_]) AS staff, "
+        f"SUM(d.[Quantity]) AS hours {base}GROUP BY CAST(d.[Date] AS date) ORDER BY day", params)
+    covered = erp.query(f"SELECT MIN([Date]) AS first_day, MAX([Date]) AS last_day "
+                        f"FROM {_t('Time Sheet Detail')}")
+    out = {"date_from": _clean(start), "date_to": _clean(end), "resource_group": params["g"] or None,
+           **(_rows(totals)[0] if totals else {}), "per_group": _rows(per_group), "per_day": _rows(per_day),
+           "roster_covers": _rows(covered)[0] if covered else {},
+           "note": "Hours are the rostered (planned) hours. The time sheets don't record the site, "
+                   "customer or contract, so staff can't be counted per site or contract."}
+    if not (totals and totals[0]["staff"]):
+        out["note"] = "Nobody is rostered in this period. " + out["note"]
+    return out
+
+
 # --------------------------------------------------- what the model is told
 _STR = {"type": "string"}
 LOOKUPS = {
@@ -670,6 +769,23 @@ LOOKUPS = {
     "contract_trend": (contract_trend, "Contracts started per month over the last N months, with how many "
                        "are signed and their yearly value (for growth or trend questions).",
                        {"months": dict(_STR, description="Number of months back, 1-36 (default 12)")}, []),
+    "contract_billing": (contract_billing, "What was invoiced on service contracts (posted contract "
+                         "invoices): total amount and number of invoices for one contract, one customer "
+                         "or all contracts, optionally between two dates; per month; the top contracts "
+                         "by amount invoiced; and the invoices themselves. Use it for billing, invoiced "
+                         "revenue and 'how much did we bill' questions.",
+                         {"contract_no": dict(_STR, description="Optional contract number, e.g. SC00123"),
+                          "customer_no": dict(_STR, description="Optional customer number, e.g. C00123"),
+                          "date_from": dict(_STR, description="Optional first day, YYYY-MM-DD (or YYYY-MM)"),
+                          "date_to": dict(_STR, description="Optional last day, YYYY-MM-DD (or YYYY-MM)")},
+                         []),
+    "staff_roster": (staff_roster, "How many staff (guards) are rostered on the service time sheets "
+                     "for a date range, with shifts and planned hours, per resource group and per day. "
+                     "Defaults to the 7 days from today. Counts only; it can't tell the site, customer "
+                     "or contract.",
+                     {"date_from": dict(_STR, description="First day, YYYY-MM-DD (default today)"),
+                      "date_to": dict(_STR, description="Last day, YYYY-MM-DD (default 6 days later)"),
+                      "group": dict(_STR, description="Optional resource group code, as the lookup returns it")}, []),
     "data_quality": (data_quality, "Gaps in the ERP data: service items without a group, customer or "
                      "serial number, or never serviced; customers without city or salesperson; contracts "
                      "not signed or missing a customer, description or next invoice date.", {}, []),
@@ -710,6 +826,12 @@ EXAMPLE_QUESTIONS = [
     ("What changed on service items this week?", ["recent_service_changes"]),
     ("Has anything changed on C00123's services in the last 30 days?", ["recent_service_changes"]),
     ("How many contracts did we start each month this year?", ["contract_trend"]),
+    # billing and roster
+    ("How much have we invoiced on contract SC00123?", ["contract_billing"]),
+    ("What did we bill on contracts each month this year?", ["contract_billing"]),
+    ("Which contracts brought in the most invoiced revenue?", ["contract_billing"]),
+    ("Show customer C00123's contract invoices since January", ["contract_billing"]),
+    ("How many guards are rostered next week, and for how many hours?", ["staff_roster"]),
     # follow-ups and data gaps
     ("Which customers have services but no active contract?", ["customers_without_active_contract"]),
     ("How complete is our ERP data? What's missing?", ["data_quality"]),
@@ -719,6 +841,8 @@ EXAMPLE_QUESTIONS = [
     ("Customer C00123: what services do they have, and are they covered by a signed contract?",
      ["customer_services", "find_contracts"]),
     ("Of the customers in Mombasa, which have alarm services?", ["services_at_location"]),
+    ("Is contract SC00123 active, and how much has it been invoiced so far?",
+     ["find_contracts", "contract_billing"]),
 ]
 
 
@@ -794,10 +918,12 @@ def instructions(app=None, mode="service"):
                  f"change history, totals per service group, service contracts (single ones, and "
                  f"totals such as how many are active), blocked customers, customer rankings and "
                  f"breakdowns (by city, salesperson, branch), service items at a place or site, "
-                 f"recent changes, contract trends, customers without an active contract, and gaps "
-                 f"in the data.")
+                 f"recent changes, contract trends, customers without an active contract, gaps "
+                 f"in the data, what was invoiced on contracts (billing per contract, customer or "
+                 f"month), and how many staff are rostered on the service time sheets.")
     return f"""
 
+Today is {dt.date.today().isoformat()}; work out dates like "this year" or "next week" from it.
 {scope} Use a lookup whenever the user asks about a specific
 customer, service, contract, a count, a ranking or a comparison; never guess or invent ERP
 data. For harder questions, call several lookups (in the same turn when they don't depend
@@ -806,9 +932,12 @@ percentages) yourself from the numbers returned. If a question is ambiguous, ans
 most likely reading and say which one you used.
 
 Say briefly that the figures come from the ERP. If a lookup finds nothing or fails, say so
-plainly. If a list was cut short (a "note" says so), say that it's a partial list. There is
-no invoice, payment or balance data, and you can't see employees, payroll or personal ID
-numbers; say so if asked. Customer numbers look like the "number" values the lookups return.
+plainly. If a list was cut short (a "note" says so), say that it's a partial list. The only
+invoice data is what was invoiced on service contracts (contract_billing, in Service mode);
+there is no payment, balance or profit data, and you can't see employees' names, payroll,
+salaries or personal ID numbers; say so if asked. Contract profitability can't be worked out
+because staff costs aren't linked to contracts in the ERP (the time sheets don't record the
+contract); offer what was invoiced on the contract instead. Customer numbers look like the "number" values the lookups return.
 
 Examples of questions and the lookups that answer them:
 {examples}"""

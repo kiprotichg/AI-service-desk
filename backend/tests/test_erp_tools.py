@@ -342,7 +342,7 @@ def test_examples_and_guidance_reach_the_model(app):
 
 def test_every_lookup_is_declared_to_the_model():
     declared = {d.name for d in erp_tools.gemini_tool().function_declarations}
-    assert declared == set(erp_tools.LOOKUPS) and len(declared) == 15
+    assert declared == set(erp_tools.LOOKUPS) and len(declared) == 17
 
 
 def test_rank_customers_by_services_and_value(app, fake_query):
@@ -597,3 +597,65 @@ def test_a_short_rate_limit_is_waited_out(app):
 
 def test_busy_message_does_not_blame_the_erp():
     assert "ERP" not in ai_service.AI_BUSY and "again in a minute" in ai_service.AI_BUSY
+
+
+# ------------------------------------------------- contract billing and roster
+def test_contract_billing_for_one_contract(app, fake_query):
+    import datetime as _dt
+    fake_query.queue += [
+        [{"invoice_count": 2, "amount_invoiced": 1500.5, "contracts": 1, "customers": 1,
+          "first_invoice": _dt.datetime(2026, 1, 31), "last_invoice": _dt.datetime(2026, 2, 28)}],
+        [{"y": 2026, "mo": 2, "invoices": 1, "amount_invoiced": 750.25},
+         {"y": 2026, "mo": 1, "invoices": 1, "amount_invoiced": 750.25}],
+        [{"date": _dt.datetime(2026, 2, 28), "invoice_no": "INV-2", "contract_no": "SC90001",
+          "amount": 750.25, "invoice_period": "Month"}]]
+    with app.app_context():
+        r = erp_tools.contract_billing(contract_no=" sc90001 ", date_from="2026-01", date_to="2026-02")
+    sql, params = fake_query.calls[0]
+    assert "[IDEALDYNAMICS_PROP$Service Ledger Entry]" in sql and "[Entry Type] = 1" in sql
+    assert "-SUM(s.[Amount (LCY)])" in sql                       # sales are stored negative
+    assert params["c"] == "SC90001" and str(params["df"]) == "2026-01-01" and str(params["dt"]) == "2026-02-28"
+    assert [m["month"] for m in r["per_month"]] == ["2026-01", "2026-02"]   # oldest first
+    assert r["invoice_count"] == 2 and r["invoices"][0]["date"] == "2026-02-28"
+    assert "top_contracts" not in r and "note" not in r
+    json.dumps(r)
+
+
+def test_contract_billing_for_everyone_lists_top_contracts(app, fake_query):
+    fake_query.queue += [[{"invoice_count": 0, "amount_invoiced": None, "contracts": 0, "customers": 0,
+                           "first_invoice": None, "last_invoice": None}], [], []]
+    with app.app_context():
+        r = erp_tools.contract_billing(date_from="not a date")
+    assert len(fake_query.calls) == 3 and "top_contracts" in r and "invoices" not in r
+    assert "Customer]" in fake_query.calls[2][0] and r["note"].startswith("No posted contract invoices")
+    assert str(fake_query.calls[0][1]["df"]) == "1753-01-02"      # bad date -> no lower limit
+
+
+def test_date_arguments():
+    assert str(erp_tools._date_arg("2026-02", end=True)) == "2026-02-28"
+    assert str(erp_tools._date_arg("2026-12", end=True)) == "2026-12-31"
+    assert str(erp_tools._date_arg("2026-03-15")) == "2026-03-15"
+    assert erp_tools._date_arg("2026-13") is None and erp_tools._date_arg("next week") is None
+
+
+def test_staff_roster_counts_without_names(app, fake_query):
+    fake_query.queue += [[{"staff": 3, "shifts": 6, "hours": 72}],
+                         [{"resource_group": "GRP_A", "staff": 3, "hours": 72}], [], [{"first_day": None,
+                                                                                       "last_day": None}]]
+    with app.app_context():
+        r = erp_tools.staff_roster("2026-12-07", "2026-12-01", "grp_a")
+    sql, params = fake_query.calls[0]
+    assert "[IDEALDYNAMICS_PROP$Time Sheet Detail]" in sql and params["g"] == "GRP_A"
+    assert str(params["df"]) == "2026-12-01" and str(params["dt"]) == "2026-12-07"   # swapped back
+    assert not any("Name" in s for s, _ in fake_query.calls)    # never reads staff names
+    assert r["staff"] == 3 and "can't be counted per site" in r["note"]
+
+
+def test_billing_and_roster_are_service_only(app):
+    assert {"contract_billing", "staff_roster"} <= erp_tools.lookups_for("service")
+    assert not {"contract_billing", "staff_roster"} & erp_tools.lookups_for("sales")
+    app.config.update(ERP)
+    with app.app_context():
+        text = erp_tools.instructions(mode="service")
+    assert "contract_billing" in text and "profitability can't be worked out" in text
+    assert "Today is 20" in text
