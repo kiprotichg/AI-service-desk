@@ -535,21 +535,6 @@ _ERP_CLAIM = re.compile(r"\bERP\b", re.I)
 _FIGURE = re.compile(r"\d[\d,]*(?:\.\d+)?")
 
 
-DO_IT_NOW = ("Don't ask me first: do it now. Run the lookups you need (if you haven't yet) and give "
-             "the full answer with the figures in this reply. Where profit can't be worked out, use "
-             "invoiced revenue instead and say so in one sentence.")
-_ASKS_FIRST = re.compile(r"\b(?:would you like|if you(?:'d| would) like|please let me know if|"
-                         r"let me know if you(?:'d| would) like|shall i|should i (?:go ahead|proceed)|"
-                         r"do you want me to)\b", re.I)
-_AMOUNT = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d{2}\b")
-
-
-def _asks_instead_of_answering(text):
-    """An answer that offers to look something up ("Would you like me to...?") but gives no
-    figures, so the user would have to ask twice."""
-    return bool(_ASKS_FIRST.search(text)) and len(_AMOUNT.findall(text)) < 2
-
-
 def _unsupported_erp_claim(text):
     """An answer that quotes ERP figures although no lookup ran (so the model made them up)."""
     return bool(_ERP_CLAIM.search(text)) and len(_FIGURE.findall(text)) >= 1
@@ -634,7 +619,7 @@ def _gemini_stream(history, user_turn, attachments, system, web_search, mode, us
         splitter, sources, started, used = _MetaSplitter(), [], False, []
         convo = list(contents)
         try:
-            nudged = checked = pushed = False
+            nudged = checked = False
             for round_no in range(MAX_LOOKUP_ROUNDS + 2):
                 config = _gemini_config(system, web_search, lookups=lookups,
                                         allow_calls=round_no < MAX_LOOKUP_ROUNDS, mode=mode)
@@ -662,16 +647,6 @@ def _gemini_stream(history, user_turn, attachments, system, web_search, mode, us
                     yield ("reset", None)
                     convo += [types.Content(role="model", parts=model_parts),
                               types.Content(role="user", parts=[types.Part(text=LOOKUP_FIRST)])]
-                    splitter, started = _MetaSplitter(), False
-                    continue
-                if (started and lookups and not pushed and round_no < MAX_LOOKUP_ROUNDS
-                        and _asks_instead_of_answering(splitter.visible)):
-                    # It offered to do it instead of doing it: throw that away and tell it to answer.
-                    pushed = True
-                    log.warning("answer asked instead of answering; asking again")
-                    yield ("reset", None)
-                    convo += [types.Content(role="model", parts=model_parts),
-                              types.Content(role="user", parts=[types.Part(text=DO_IT_NOW)])]
                     splitter, started = _MetaSplitter(), False
                     continue
                 if started or not lookups:

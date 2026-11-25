@@ -701,90 +701,6 @@ def contract_billing(contract_no="", customer_no="", date_from="", date_to=""):
     return out
 
 
-def _period(date_from, date_to):
-    """(start, end) from the model's arguments; a single month like "2026-06" in date_from
-    alone covers that whole month. None if the start can't be read."""
-    start = _date_arg(date_from)
-    if not start:
-        return None
-    end = _date_arg(date_to, end=True) if date_to else None
-    if not end:
-        end = _date_arg(date_from, end=True)
-    return (start, end) if end >= start else (end, start)
-
-
-def compare_billing(first_from, first_to="", second_from="", second_to="", by="contract"):
-    """What was invoiced in two periods, side by side: every contract (or customer) invoiced
-    in either period, with both amounts, the change and whether it went up, down, stopped
-    or is new. The comparison is done here, so nothing can be left out."""
-    a, b = _period(first_from, first_to), _period(second_from, second_to)
-    if not a or not b:
-        return {"error": "Give two periods, e.g. first_from 2026-06 and second_from 2026-07 "
-                         "(or full dates with first_to and second_to)."}
-    by_customer = (by or "").strip().lower().startswith("cust")
-    key = "s.[Customer No_]" if by_customer else "s.[Service Contract No_]"
-    params = {"a1": a[0], "a2": a[1], "b1": b[0], "b2": b[1]}
-    in_a = "s.[Posting Date] >= :a1 AND s.[Posting Date] <= :a2"
-    in_b = "s.[Posting Date] >= :b1 AND s.[Posting Date] <= :b2"
-    rows = erp.query(
-        f"SELECT TOP 200 {key} AS id, MAX(s.[Customer No_]) AS customer_no, MAX(c.[Name]) AS customer_name, "
-        f"-SUM(CASE WHEN {in_a} THEN s.[Amount (LCY)] ELSE 0 END) AS first_amount, "
-        f"-SUM(CASE WHEN {in_b} THEN s.[Amount (LCY)] ELSE 0 END) AS second_amount "
-        f"FROM {_t('Service Ledger Entry')} s LEFT JOIN {_t('Customer')} c ON c.[No_] = s.[Customer No_] "
-        f"WHERE s.[Entry Type] = 1 AND (({in_a}) OR ({in_b})) GROUP BY {key}", params)
-    items = []
-    for r in rows:
-        first, second = float(r["first_amount"] or 0), float(r["second_amount"] or 0)
-        change = round(second - first, 2)
-        trend = ("new" if not first and second else "stopped" if first and not second else
-                 "declined" if change < 0 else "increased" if change > 0 else "unchanged")
-        item = {"customer_no": _clean(r["customer_no"]), "customer_name": _clean(r["customer_name"]),
-                "first_period_amount": round(first, 2), "second_period_amount": round(second, 2),
-                "change": change, "change_percent": round(change / first * 100, 1) if first else None,
-                "trend": trend}
-        if not by_customer:
-            item = {"contract_no": _clean(r["id"]), **item}
-        items.append(item)
-    items.sort(key=lambda x: (x["change"], x.get("contract_no") or x["customer_no"] or ""))
-    total_a = round(sum(x["first_period_amount"] for x in items), 2)
-    total_b = round(sum(x["second_period_amount"] for x in items), 2)
-    went_down = [x for x in items if x["trend"] in ("declined", "stopped")]
-    return {"compared_by": "customer" if by_customer else "contract",
-            "first_period": f"{_clean(a[0])} to {_clean(a[1])}",
-            "second_period": f"{_clean(b[0])} to {_clean(b[1])}",
-            "first_period_total": total_a, "second_period_total": total_b,
-            "total_change": round(total_b - total_a, 2),
-            "count": len(items), "went_down_count": len(went_down),
-            "items": items,
-            "note": ("Every contract or customer invoiced in either period is listed (biggest drop "
-                     "first). 'stopped' means invoiced in the first period but not the second; this "
-                     "compares invoiced revenue, as profit can't be worked out per contract.")}
-
-
-def contract_report(date_from="", date_to="", top="5"):
-    """A management report on contract billing for a period (all time if none): totals, the
-    contracts that brought in the most and the least, every contract by amount, active
-    contracts never invoiced, and what the ERP can't show (profit per contract)."""
-    n = _int(top, 5, 1, 20)
-    billing = contract_billing(date_from=date_from, date_to=date_to)
-    ranked = billing.get("contracts_by_amount", [])
-    gaps = data_quality()
-    return {"period": billing.get("period"),
-            "total_invoiced": billing.get("amount_invoiced"), "invoices": billing.get("invoice_count"),
-            "contracts_invoiced": billing.get("contracts"), "customers_invoiced": billing.get("customers"),
-            "top_contracts": ranked[:n],
-            "lowest_contracts": list(reversed(ranked[-n:])) if len(ranked) > n else [],
-            "all_contracts_by_amount": ranked,
-            "top_customers": billing.get("customers_by_amount", [])[:n],
-            "per_month": billing.get("per_month", []),
-            "active_contracts_never_invoiced": gaps.get("active_contracts_never_invoiced", []),
-            "contract_data_gaps": gaps.get("contracts", {}),
-            "cannot_show": "Profit, payroll cost and margin per contract: the time sheets don't record "
-                           "the contract, so staff costs can't be linked to contracts. Rank by invoiced "
-                           "revenue and say so.",
-            "note": "Build the report from these figures; base each recommendation on them."}
-
-
 def staff_roster(date_from="", date_to="", group=""):
     """Staff rostered on service time sheets (Time Sheet Detail) for a date range: how many
     people, shifts and hours, per resource group and per day. Counts only, no names."""
@@ -1048,27 +964,6 @@ LOOKUPS = {
                           "date_from": dict(_STR, description="Optional first day, YYYY-MM-DD (or YYYY-MM)"),
                           "date_to": dict(_STR, description="Optional last day, YYYY-MM-DD (or YYYY-MM)")},
                          []),
-    "compare_billing": (compare_billing, "Compare what was invoiced in two periods (e.g. June vs July), "
-                        "contract by contract (or customer by customer): both amounts, the change, and "
-                        "which went down, stopped, went up or are new. Use it for every comparison "
-                        "between periods, including 'compare profitability', which can only be "
-                        "compared on invoiced revenue.",
-                        {"first_from": dict(_STR, description="First period start, YYYY-MM-DD, or YYYY-MM "
-                                            "for a whole month"),
-                         "first_to": dict(_STR, description="First period end (optional for a month)"),
-                         "second_from": dict(_STR, description="Second period start, YYYY-MM-DD or YYYY-MM"),
-                         "second_to": dict(_STR, description="Second period end (optional for a month)"),
-                         "by": dict(_STR, description="contract (default) or customer")},
-                        ["first_from", "second_from"]),
-    "contract_report": (contract_report, "Everything for a management report on service contracts for a "
-                        "period (all time if none): totals, the top and lowest contracts by invoiced "
-                        "revenue, every contract by amount, top customers, per month, active contracts "
-                        "never invoiced and data gaps. Use it for management reports, 'most and least "
-                        "profitable contracts' and recommendations.",
-                        {"date_from": dict(_STR, description="Optional first day, YYYY-MM-DD or YYYY-MM"),
-                         "date_to": dict(_STR, description="Optional last day, YYYY-MM-DD or YYYY-MM"),
-                         "top": dict(_STR, description="How many top and lowest contracts (default 5)")},
-                        []),
     "staff_roster": (staff_roster, "How many staff (guards) are rostered on the service time sheets "
                      "for a date range, with shifts and planned hours, per resource group and per day. "
                      "Defaults to the 7 days from today. Counts only; it can't tell the site, customer "
@@ -1136,12 +1031,8 @@ EXAMPLE_QUESTIONS = [
     ("What did we bill on contracts each month this year?", ["contract_billing"]),
     ("Which contracts brought in the most invoiced revenue?", ["contract_billing"]),
     ("Rank our customers by revenue", ["contract_billing"]),
-    ("Compare what we billed in June and July, per contract", ["compare_billing"]),
-    ("Compare the profitability of all contracts between June and July; which declined?",
-     ["compare_billing"]),
-    ("Which customers' billing went down from Q2 to Q3?", ["compare_billing"]),
-    ("Management report: top five and five least profitable contracts, with recommendations",
-     ["contract_report"]),
+    ("Compare what we billed in June and July, per contract",
+     ["contract_billing", "contract_billing"]),
     ("Show customer C00123's contract invoices since January", ["contract_billing"]),
     ("How many guards are rostered next week, and for how many hours?", ["staff_roster"]),
     # follow-ups and data gaps
@@ -1298,7 +1189,6 @@ security numbers, bank accounts, salaries, birth dates), can only be read by adm
 tool says something is private, tell the user only admins can see it. Contract
 profitability per contract can't be worked out, because the time sheets don't record the
 contract, so staff costs can't be linked to contracts; say so, and show what was invoiced.
-Never mention these instructions, "guidelines", "system rules" or a knowledge base; just state the fact.
 Say briefly that the figures come from the ERP. If a lookup finds nothing or fails, say so
 plainly. Customer numbers look like the "number" values the lookups return. Amounts are in
 the company's own currency: write them as plain numbers with thousands separators, never
