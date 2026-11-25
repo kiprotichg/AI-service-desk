@@ -623,10 +623,12 @@ def test_contract_billing_for_one_contract(app, fake_query):
 
 def test_contract_billing_for_everyone_lists_top_contracts(app, fake_query):
     fake_query.queue += [[{"invoice_count": 0, "amount_invoiced": None, "contracts": 0, "customers": 0,
-                           "first_invoice": None, "last_invoice": None}], [], []]
+                           "first_invoice": None, "last_invoice": None}], [], [], []]
     with app.app_context():
         r = erp_tools.contract_billing(date_from="not a date")
-    assert len(fake_query.calls) == 3 and "top_contracts" in r and "invoices" not in r
+    assert len(fake_query.calls) == 4 and "invoices" not in r
+    assert "top_contracts" in r and "top_customers" in r
+    assert "GROUP BY s.[Customer No_]" in fake_query.calls[3][0]
     assert "Customer]" in fake_query.calls[2][0] and r["note"].startswith("No posted contract invoices")
     assert str(fake_query.calls[0][1]["df"]) == "1753-01-02"      # bad date -> no lower limit
 
@@ -659,3 +661,50 @@ def test_billing_and_roster_are_service_only(app):
         text = erp_tools.instructions(mode="service")
     assert "contract_billing" in text and "profitability can't be worked out" in text
     assert "Today is 20" in text
+
+
+def test_answer_rules_for_partial_and_revenue_questions(app):
+    app.config.update(ERP)
+    with app.app_context():
+        text = erp_tools.instructions(mode="service")
+    assert "Answer what you can, straight away" in text and "Don't ask \"would you like" in text
+    assert "means what was invoiced (contract_billing)" in text
+    assert "Never present the period the user asked about as a contract's dates" in text
+
+
+
+class MadeUpGemini(LookupGemini):
+    """First answers with invented "ERP" figures; once told to look up first, does so."""
+    def _stream(self, **kw):
+        self.calls.append(kw)
+        last = kw["contents"][-1].parts[0]
+        def say(text):
+            part = SimpleNamespace(function_call=None, text=text, thought=False)
+            return iter([SimpleNamespace(text=text, candidates=[SimpleNamespace(content=SimpleNamespace(parts=[part]))])])
+        if len(self.calls) == 1:
+            return say("According to the ERP, we invoiced 16,845,210.00 across 322 invoices.")
+        if getattr(last, "text", None) == ai_service.LOOKUP_FIRST:
+            call = SimpleNamespace(name="contract_billing", args={"date_from": "2026-06"}, id="c1")
+            part = SimpleNamespace(function_call=call, text=None, thought=False)
+            return iter([SimpleNamespace(text=None, candidates=[SimpleNamespace(content=SimpleNamespace(parts=[part]))])])
+        return say("Per the ERP, 123,456.78 was invoiced across 6 invoices.")
+
+
+def test_made_up_erp_figures_are_replaced_by_looked_up_ones(app, client, monkeypatch):
+    _, looked_up, conv = _setup(app, monkeypatch, client, "jane@idealdynamics.co.ke")
+    fake = MadeUpGemini()
+    monkeypatch.setattr(ai_service, "_get_gemini_client", lambda: fake)
+    res = client.post(f"/api/conversations/{conv['id']}/messages?stream=1",
+                      headers={"X-Conversation-Token": conv["token"]},
+                      json={"content": "Compare June and July billing", "mode": "service"})
+    events = [json.loads(line) for line in res.get_data(as_text=True).splitlines()]
+    kinds = [e["type"] for e in events]
+    assert kinds.count("reset") == 1 and looked_up == [("contract_billing", {"date_from": "2026-06"})]
+    assert events[-1]["reply"]["content"].startswith("Per the ERP, 123,456.78")
+    assert "16,845,210" not in events[-1]["reply"]["content"]
+
+
+def test_what_counts_as_an_unsupported_erp_claim():
+    assert ai_service._unsupported_erp_claim("According to the ERP, 322 invoices were posted.")
+    assert not ai_service._unsupported_erp_claim("Profit can't be worked out from the ERP.")
+    assert not ai_service._unsupported_erp_claim("Step 1: open the Service module.")

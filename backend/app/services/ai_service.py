@@ -527,6 +527,15 @@ AI_BUSY = ("Sorry, the AI service is very busy right now, so I couldn't answer t
            "send your message again in a minute.")
 ANSWER_NOW = ("Answer my question now using the ERP data the lookups above returned. Don't call "
               "any more lookups; if something is missing, say what you couldn't find.")
+LOOKUP_FIRST = ("Your answer gave ERP figures, but no lookup was run, so they aren't real ERP data. "
+                "Call the lookups that answer my question now, and use only the numbers they return.")
+_ERP_CLAIM = re.compile(r"\bERP\b", re.I)
+_FIGURE = re.compile(r"\d[\d,]*(?:\.\d+)?")
+
+
+def _unsupported_erp_claim(text):
+    """An answer that quotes ERP figures although no lookup ran (so the model made them up)."""
+    return bool(_ERP_CLAIM.search(text)) and len(_FIGURE.findall(text)) >= 1
 
 
 def _chunk_parts(chunk):
@@ -604,7 +613,7 @@ def _gemini_stream(history, user_turn, attachments, system, web_search, mode, us
         splitter, sources, started, used = _MetaSplitter(), [], False, []
         convo = list(contents)
         try:
-            nudged = False
+            nudged = checked = False
             for round_no in range(MAX_LOOKUP_ROUNDS + 2):
                 config = _gemini_config(system, web_search, lookups=lookups,
                                         allow_calls=round_no < MAX_LOOKUP_ROUNDS, mode=mode)
@@ -623,6 +632,17 @@ def _gemini_stream(history, user_turn, attachments, system, web_search, mode, us
                     if web_search:
                         sources = _gemini_sources(chunk) or sources
                 # Lookups run only for users allowed to use them, whatever the model asks for.
+                if (started and lookups and not checked and len(convo) == len(contents)   # no lookup tried
+                        and round_no < MAX_LOOKUP_ROUNDS and _unsupported_erp_claim(splitter.visible)):
+                    # It answered with "ERP" numbers without looking anything up: throw that
+                    # answer away and ask again, this time with the lookups.
+                    checked = True
+                    log.warning("answer quoted ERP figures without a lookup; asking again")
+                    yield ("reset", None)
+                    convo += [types.Content(role="model", parts=model_parts),
+                              types.Content(role="user", parts=[types.Part(text=LOOKUP_FIRST)])]
+                    splitter, started = _MetaSplitter(), False
+                    continue
                 if started or not lookups:
                     break
                 if not calls or round_no >= MAX_LOOKUP_ROUNDS:

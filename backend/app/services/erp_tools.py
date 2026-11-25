@@ -648,6 +648,14 @@ def contract_billing(contract_no="", customer_no="", date_from="", date_to=""):
             f"{base.replace('WHERE', 'LEFT JOIN ' + _t('Customer') + ' c ON c.[No_] = s.[Customer No_] WHERE', 1)}"
             f"GROUP BY s.[Service Contract No_] ORDER BY amount_invoiced DESC", params)
         out["top_contracts"] = _rows(top)
+    if not params["c"] and not params["cu"]:
+        by_customer = erp.query(
+            f"SELECT TOP 10 s.[Customer No_] AS customer_no, MAX(c.[Name]) AS customer_name, "
+            f"COUNT(DISTINCT s.[Service Contract No_]) AS contracts, COUNT(DISTINCT s.[Document No_]) AS invoices, "
+            f"-SUM(s.[Amount (LCY)]) AS amount_invoiced "
+            f"{base.replace('WHERE', 'LEFT JOIN ' + _t('Customer') + ' c ON c.[No_] = s.[Customer No_] WHERE', 1)}"
+            f"GROUP BY s.[Customer No_] ORDER BY amount_invoiced DESC", params)
+        out["top_customers"] = _rows(by_customer)
     if params["c"] or params["cu"]:
         invoices = erp.query(
             f"SELECT TOP 40 s.[Posting Date] AS date, s.[Document No_] AS invoice_no, "
@@ -772,7 +780,7 @@ LOOKUPS = {
     "contract_billing": (contract_billing, "What was invoiced on service contracts (posted contract "
                          "invoices): total amount and number of invoices for one contract, one customer "
                          "or all contracts, optionally between two dates; per month; the top contracts "
-                         "by amount invoiced; and the invoices themselves. Use it for billing, invoiced "
+                         "and top customers by amount invoiced; and the invoices themselves. Use it for billing, invoiced "
                          "revenue and 'how much did we bill' questions.",
                          {"contract_no": dict(_STR, description="Optional contract number, e.g. SC00123"),
                           "customer_no": dict(_STR, description="Optional customer number, e.g. C00123"),
@@ -830,6 +838,9 @@ EXAMPLE_QUESTIONS = [
     ("How much have we invoiced on contract SC00123?", ["contract_billing"]),
     ("What did we bill on contracts each month this year?", ["contract_billing"]),
     ("Which contracts brought in the most invoiced revenue?", ["contract_billing"]),
+    ("Rank our customers by revenue", ["contract_billing"]),
+    ("Compare what we billed in June and July, per contract",
+     ["contract_billing", "contract_billing"]),
     ("Show customer C00123's contract invoices since January", ["contract_billing"]),
     ("How many guards are rostered next week, and for how many hours?", ["staff_roster"]),
     # follow-ups and data gaps
@@ -937,7 +948,20 @@ invoice data is what was invoiced on service contracts (contract_billing, in Ser
 there is no payment, balance or profit data, and you can't see employees' names, payroll,
 salaries or personal ID numbers; say so if asked. Contract profitability can't be worked out
 because staff costs aren't linked to contracts in the ERP (the time sheets don't record the
-contract); offer what was invoiced on the contract instead. Customer numbers look like the "number" values the lookups return.
+contract). Customer numbers look like the "number" values the lookups return.
+
+Answer what you can, straight away. If only part of a question can be answered (for
+example profit, payroll or staff per contract), run the lookups for the parts you can
+answer (such as what was invoiced) and show those results in this reply, then say in one
+sentence what's missing and why. Don't ask "would you like to see...?" first.
+
+"Revenue", "income" or "how much did we bill" means what was invoiced (contract_billing);
+use the yearly contract value (annual amount) only when the user asks for contract value,
+or as an extra column you clearly label.
+
+Report every date, amount and status exactly as a lookup returned it, with its own label.
+Never present the period the user asked about as a contract's dates: a contract's start,
+end and invoice dates come only from contract_details or find_contracts.
 
 Examples of questions and the lookups that answer them:
 {examples}"""
