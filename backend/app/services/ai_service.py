@@ -360,13 +360,15 @@ def stream_reply(history, user_message, attachments=(), mode="service", web_sear
     history = history[-cfg["MAX_HISTORY_MESSAGES"]:]
     try_search = web_search and time.monotonic() >= _search_off_until
     lookups = erp_lookups and _uses_erp(mode)
-    system = PROMPTS[mode] + (erp_tools.instructions(mode=mode) if lookups else "") + STREAM_FORMAT
+    system = PROMPTS[mode] + (erp_tools.instructions(mode=mode, full_access=erp_lookups == "full")
+                              if lookups else "") + STREAM_FORMAT
     for search in ([True, False] if try_search else [False]):
         started = False
         try:
             turn = _user_turn(user_message, faqs, attachments, mode, search)
             for kind, value in _gemini_stream(history, turn, attachments, system, search,
-                                              mode, user_message, lookups=lookups):
+                                              mode, user_message, lookups=lookups,
+                                              full_access=erp_lookups == "full"):
                 if kind == "delta":
                     started = True
                     yield ("delta", value)
@@ -522,7 +524,7 @@ def _gemini_config(system, web_search, json_output=False, lookups=False, allow_c
         tools=tools or None, **extra)
 
 
-MAX_LOOKUP_ROUNDS = 3
+MAX_LOOKUP_ROUNDS = 6   # finding a table, reading its columns and querying it takes 3
 AI_BUSY = ("Sorry, the AI service is very busy right now, so I couldn't answer that. Please "
            "send your message again in a minute.")
 ANSWER_NOW = ("Answer my question now using the ERP data the lookups above returned. Don't call "
@@ -545,7 +547,7 @@ def _chunk_parts(chunk):
         return []
 
 
-def _lookup_responses(calls, used, mode="service", cache=None):
+def _lookup_responses(calls, used, mode="service", cache=None, full_access=False):
     """Run the ERP lookups the model asked for; one function_response part per call.
 
     Only the lookups that belong to this mode run (Sales can't read service items, for
@@ -566,7 +568,11 @@ def _lookup_responses(calls, used, mode="service", cache=None):
     def run_one(call):
         if call.name not in allowed:
             return erp_tools.not_in_this_mode(call.name, mode)
-        return erp_tools.run_lookup(call.name, dict(call.args or {}))
+        token = erp_tools.FULL_ACCESS.set(full_access)   # payroll and HR tables: admins only
+        try:
+            return erp_tools.run_lookup(call.name, dict(call.args or {}))
+        finally:
+            erp_tools.FULL_ACCESS.reset(token)
 
     todo = list(unique.values())
     if len(todo) > 1:
@@ -591,7 +597,7 @@ def _lookup_responses(calls, used, mode="service", cache=None):
 
 
 def _gemini_stream(history, user_turn, attachments, system, web_search, mode, user_message,
-                   lookups=False):
+                   lookups=False, full_access=False):
     """Yield ("delta", text)... then ("reply", AIReply). Tries the fallback model if the
     main one is overloaded (if it breaks off mid-answer, ("reset", None) comes first).
 
@@ -656,7 +662,8 @@ def _gemini_stream(history, user_turn, attachments, system, web_search, mode, us
                     continue
                 # Keep the model's own parts (they carry its thought signatures) and add the results.
                 convo += [types.Content(role="model", parts=model_parts),
-                          types.Content(role="user", parts=_lookup_responses(calls, used, mode, cache))]
+                          types.Content(role="user", parts=_lookup_responses(calls, used, mode, cache,
+                                                                                 full_access))]
         except Exception as exc:
             if (i == len(models) - 1 or not _is_overloaded(exc)
                     or (web_search and _is_quota_error(exc))):   # search quota covers every model

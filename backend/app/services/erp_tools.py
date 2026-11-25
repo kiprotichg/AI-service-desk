@@ -1,16 +1,19 @@
 """ERP lookups the assistant may call while answering (Gemini function calling).
 
-Every lookup is a fixed, parameterised SELECT on the configured company (ERP_COMPANY),
-returns a small number of rows, and runs through erp.query (read-only, rolled back).
-On purpose there are no lookups for employees, payroll, resources (national ID and
-social security numbers) or contact phone numbers.
+Most lookups are fixed, parameterised SELECTs on the configured company (ERP_COMPANY).
+The general tools (list_tables, describe_table, run_query) let the model read any other
+table of that company with its own SELECT. Everything runs through erp.query (read-only,
+always rolled back). Payroll, HR, bank and system tables and private columns are for
+admins only (see FULL_ACCESS).
 
 Who may use them: users whose email domain is in ERP_ALLOWED_EMAIL_DOMAINS.
 """
+import contextvars
 import datetime as dt
 import decimal
 import logging
 import re
+import time
 
 from flask import current_app
 
@@ -591,8 +594,22 @@ def data_quality():
         f"{_flag('h.[Description] = ' + empty)} AS without_description, "
         f"{_flag(_ACTIVE + ' AND h.[Next Invoice Date] < ' + no_date)} AS active_without_next_invoice_date "
         f"FROM {_t('Service Contract Header')} h")
+    not_invoiced = (f"FROM {_t('Service Contract Header')} h LEFT JOIN {_t('Customer')} c "
+                    f"ON c.[No_] = h.[Customer No_] WHERE {_ACTIVE} AND NOT EXISTS (SELECT 1 FROM "
+                    f"{_t('Service Ledger Entry')} s WHERE s.[Service Contract No_] = h.[Contract No_] "
+                    f"AND s.[Entry Type] = 1)")
+    never = erp.query(f"SELECT COUNT(*) AS n {not_invoiced}")
+    never_list = erp.query(
+        f"SELECT TOP 200 h.[Contract No_] AS contract_no, h.[Customer No_] AS customer_no, "
+        f"c.[Name] AS customer_name, h.[Starting Date] AS starting_date, h.[Annual Amount] AS annual_amount "
+        f"{not_invoiced} ORDER BY h.[Contract No_]")
     first = lambda rows: _rows(rows)[0] if rows else {}
-    return {"service_items": first(items), "customers": first(customers), "contracts": first(contracts)}
+    out_contracts = first(contracts)
+    out_contracts["active_never_invoiced"] = never[0]["n"] if never else 0
+    return {"service_items": first(items), "customers": first(customers), "contracts": out_contracts,
+            "active_contracts_never_invoiced": _rows(never_list),
+            "not_recorded_in_the_erp": "Staff costs and deployment per contract: the time sheets "
+                                       "don't record the contract, so no contract has them."}
 
 
 _DATE_ARG = re.compile(r"^\s*(\d{4})-(\d{1,2})(?:-(\d{1,2}))?\s*$")
@@ -618,8 +635,9 @@ def contract_billing(contract_no="", customer_no="", date_from="", date_to=""):
     """What was invoiced on service contracts (posted contract invoices in the Service
     Ledger Entry table): totals for one contract, one customer or all of them, per month,
     the top contracts, and the invoices themselves."""
-    start = _date_arg(date_from) or dt.date(1753, 1, 2)
-    end = _date_arg(date_to, end=True) or dt.date(9999, 12, 31)
+    given_from, given_to = _date_arg(date_from), _date_arg(date_to, end=True)
+    start = given_from or dt.date(1753, 1, 2)
+    end = given_to or dt.date(9999, 12, 31)
     params = {"c": (contract_no or "").strip().upper(), "cu": (customer_no or "").strip().upper(),
               "df": start, "dt": end}
     # Entry Type 1 = sale (what was invoiced). Sales are stored as negative amounts.
@@ -632,38 +650,52 @@ def contract_billing(contract_no="", customer_no="", date_from="", date_to=""):
         f"COUNT(DISTINCT s.[Service Contract No_]) AS contracts, COUNT(DISTINCT s.[Customer No_]) AS customers, "
         f"MIN(s.[Posting Date]) AS first_invoice, MAX(s.[Posting Date]) AS last_invoice {base}", params)
     per_month = erp.query(
-        f"SELECT TOP 24 YEAR(s.[Posting Date]) AS y, MONTH(s.[Posting Date]) AS mo, "
+        f"SELECT TOP 60 YEAR(s.[Posting Date]) AS y, MONTH(s.[Posting Date]) AS mo, "
         f"COUNT(DISTINCT s.[Document No_]) AS invoices, -SUM(s.[Amount (LCY)]) AS amount_invoiced {base}"
         f"GROUP BY YEAR(s.[Posting Date]), MONTH(s.[Posting Date]) ORDER BY y DESC, mo DESC", params)
     out = {"contract_no": params["c"] or None, "customer_no": params["cu"] or None,
-           "date_from": _clean(start) if date_from else None, "date_to": _clean(end) if date_to else None,
+           "date_from": _clean(given_from) if given_from else None,
+           "date_to": _clean(given_to) if given_to else None,
            **(_rows(totals)[0] if totals else {}),
            "per_month": [{"month": f"{r['y']:04d}-{r['mo']:02d}", "invoices": r["invoices"],
                           "amount_invoiced": _clean(r["amount_invoiced"])} for r in reversed(per_month)]}
     if not params["c"]:
         top = erp.query(
-            f"SELECT TOP 10 s.[Service Contract No_] AS contract_no, MAX(s.[Customer No_]) AS customer_no, "
+            f"SELECT TOP 200 s.[Service Contract No_] AS contract_no, MAX(s.[Customer No_]) AS customer_no, "
             f"MAX(c.[Name]) AS customer_name, COUNT(DISTINCT s.[Document No_]) AS invoices, "
             f"-SUM(s.[Amount (LCY)]) AS amount_invoiced, MAX(s.[Posting Date]) AS last_invoice "
             f"{base.replace('WHERE', 'LEFT JOIN ' + _t('Customer') + ' c ON c.[No_] = s.[Customer No_] WHERE', 1)}"
             f"GROUP BY s.[Service Contract No_] ORDER BY amount_invoiced DESC", params)
-        out["top_contracts"] = _rows(top)
+        out["contracts_by_amount"] = _rows(top)   # every contract invoiced, biggest first
     if not params["c"] and not params["cu"]:
         by_customer = erp.query(
-            f"SELECT TOP 10 s.[Customer No_] AS customer_no, MAX(c.[Name]) AS customer_name, "
+            f"SELECT TOP 200 s.[Customer No_] AS customer_no, MAX(c.[Name]) AS customer_name, "
             f"COUNT(DISTINCT s.[Service Contract No_]) AS contracts, COUNT(DISTINCT s.[Document No_]) AS invoices, "
             f"-SUM(s.[Amount (LCY)]) AS amount_invoiced "
             f"{base.replace('WHERE', 'LEFT JOIN ' + _t('Customer') + ' c ON c.[No_] = s.[Customer No_] WHERE', 1)}"
             f"GROUP BY s.[Customer No_] ORDER BY amount_invoiced DESC", params)
-        out["top_customers"] = _rows(by_customer)
+        out["customers_by_amount"] = _rows(by_customer)   # every customer invoiced, biggest first
     if params["c"] or params["cu"]:
         invoices = erp.query(
-            f"SELECT TOP 40 s.[Posting Date] AS date, s.[Document No_] AS invoice_no, "
+            f"SELECT TOP 200 s.[Posting Date] AS date, s.[Document No_] AS invoice_no, "
             f"s.[Service Contract No_] AS contract_no, -SUM(s.[Amount (LCY)]) AS amount, "
             f"MAX(s.[Contract Invoice Period]) AS invoice_period {base}"
             f"GROUP BY s.[Posting Date], s.[Document No_], s.[Service Contract No_] "
             f"ORDER BY s.[Posting Date] DESC", params)
         out["invoices"] = _rows(invoices)
+    if not params["c"] and per_month and len(per_month) > 1:
+        # Each contract per month, so periods can be compared contract by contract.
+        by_month = erp.query(
+            f"SELECT TOP 200 s.[Service Contract No_] AS contract_no, YEAR(s.[Posting Date]) AS y, "
+            f"MONTH(s.[Posting Date]) AS mo, -SUM(s.[Amount (LCY)]) AS amount_invoiced {base}"
+            f"GROUP BY s.[Service Contract No_], YEAR(s.[Posting Date]), MONTH(s.[Posting Date]) "
+            f"ORDER BY s.[Service Contract No_], y, mo", params)
+        out["contract_per_month"] = [{"contract_no": r["contract_no"], "month": f"{r['y']:04d}-{r['mo']:02d}",
+                                      "amount_invoiced": _clean(r["amount_invoiced"])} for r in by_month]
+    first = out.get("first_invoice")
+    out["period"] = (f"{out['date_from'] or 'the first invoice'} to {out['date_to'] or 'the latest invoice'}"
+                     if given_from or given_to else
+                     f"all invoices ever posted ({first} to {out.get('last_invoice')})" if first else "all time")
     if not (totals and totals[0]["invoice_count"]):
         out["note"] = "No posted contract invoices match this."
     return out
@@ -700,6 +732,150 @@ def staff_roster(date_from="", date_to="", group=""):
     if not (totals and totals[0]["staff"]):
         out["note"] = "Nobody is rostered in this period. " + out["note"]
     return out
+
+
+# ------------------------------------------------- read any table (general tools)
+# Besides the fixed lookups above, the model can read any table of the configured
+# company: find tables, see their columns, and run its own read-only SELECT. Tables
+# are written as {Table Name} and expanded to this company's [Company$Table], so a
+# query can't reach other companies, other databases or system tables.
+#
+# Payroll, HR, bank and system tables, and private columns (ID and social security
+# numbers, bank accounts, salaries, birth dates), are for admins only (ADMIN_EMAILS).
+FULL_ACCESS = contextvars.ContextVar("erp_full_access", default=False)
+
+_PRIVATE_TABLE = re.compile(r"payroll|employee|employment|deduction|institution|human resources|"
+                            r"config_ package|integration record|change log|user setup|"
+                            r"user time register|azure|power bi|bank", re.I)
+_PRIVATE_COLUMN = re.compile(r"social security|national id|\bid no|id number|passport|\bpin\b|kra|"
+                             r"bank account|bank branch|iban|swift|salary|basic pay|password|birth", re.I)
+PRIVATE_MESSAGE = ("That's private HR, payroll or system data, which only admins can read. Tell the "
+                   "user this and offer what you can show instead.")
+QUERY_ROWS = 200
+_tables_cache = {"at": 0.0, "company": None, "tables": []}
+
+
+def _all_tables():
+    """Every table of the company with its row count (cached for 10 minutes)."""
+    company = current_app.config.get("ERP_COMPANY")
+    now = time.monotonic()
+    if _tables_cache["company"] != company or now - _tables_cache["at"] > 600:
+        _tables_cache.update(at=now, company=company, tables=erp.company_tables(with_rows_only=False))
+    return _tables_cache["tables"]
+
+
+def _private(table):
+    return bool(_PRIVATE_TABLE.search(table)) and not FULL_ACCESS.get()
+
+
+def _table_named(name):
+    """The company's table for a name the model gave (case and NAV spelling don't matter)."""
+    want = erp.sql_name((name or "").strip()).lower()
+    return next((t for t in _all_tables() if t["table"].lower() == want), None)
+
+
+def list_tables(search=""):
+    """Tables of the company that hold data, optionally only those whose name contains the words."""
+    words = (search or "").lower().split()
+    matches = [t for t in _all_tables() if t["row_count"] and all(w in t["table"].lower() for w in words)]
+    shown = sorted((t for t in matches if not _private(t["table"])), key=lambda t: t["table"])
+    hidden = len(matches) - len(shown)
+    return {"tables": [{"table": t["table"], "rows": t["row_count"]} for t in shown[:QUERY_ROWS]],
+            "count": len(shown),
+            "note": (f"{hidden} private HR, payroll or system tables are hidden (admins only)."
+                     if hidden else "")}
+
+
+def describe_table(table):
+    """A table's columns (names and types) and row count, to write a query on it."""
+    t = _table_named(table)
+    if not t:
+        return {"error": f"There's no table called {table!r}. Use list_tables to find the right name."}
+    if _private(t["table"]):
+        return {"error": PRIVATE_MESSAGE}
+    full = FULL_ACCESS.get()
+    columns = [{"column": c["column_name"], "type": c["type"]} for c in erp.table_columns(t["table"])
+               if c["column_name"] != "timestamp" and (full or not _PRIVATE_COLUMN.search(c["column_name"]))]
+    return {"table": t["table"], "rows": t["row_count"], "columns": columns,
+            "how_to_query": f"SELECT ... FROM {{{t['table']}}} WHERE ..."}
+
+
+_PLACEHOLDER = re.compile(r"\{([^{}]{1,80})\}")
+_FORBIDDEN = re.compile(r"\b(?:sys|information_schema|master|msdb|tempdb)\s*\.|\bdbo\b|\.\.|\$|@@|"
+                        r"\bopen(?:rowset|datasource|query|xml|json)\b|\bxp_|\bsp_|\bwaitfor\b", re.I)
+_SOURCE = re.compile(r"\b(?:from|join|apply)\s+(\S+)", re.I)
+_CTE = re.compile(r"(?:\bwith|,)\s*(\w+)\s+as\s*\(", re.I)
+_SQL_ERROR = re.compile(r"(?:\[[^\]]*\])*\s*([^\[\]]+?)\s*(?:\(\d+\)\s*)?(?:\(SQL\w+\))?$")
+
+
+def _without_literals(sql):
+    return re.sub(r"'(?:[^']|'')*'", "''", sql)
+
+
+def run_query(sql):
+    """Run one read-only SELECT the model wrote, with tables written as {Table Name}."""
+    text = (sql or "").strip().rstrip(";").strip()
+    if not text:
+        return {"error": "Write a SELECT query, with each table as {Table Name}."}
+    literal_free = _without_literals(text)
+    bare = re.sub(r"\[[^\]]*\]", "[x]", literal_free)        # [column names] can hold anything
+    ctes = {m.group(1).lower() for m in _CTE.finditer(bare)}
+    bad_source = any(not s.startswith(("{", "(")) and s.strip(",)").lower() not in ctes
+                     for s in (m.group(1) for m in _SOURCE.finditer(bare)))
+    if _FORBIDDEN.search(bare) or bad_source:
+        return {"error": "Only this company's tables can be read: write every table as {Table Name} "
+                         "(for example FROM {Service Ledger Entry} s), with no database, schema or "
+                         "company prefix."}
+    if not FULL_ACCESS.get() and _PRIVATE_COLUMN.search(literal_free):
+        return {"error": PRIVATE_MESSAGE}
+    used = []
+
+    def expand(m):
+        t = _table_named(m.group(1))
+        if not t:
+            raise LookupError(m.group(1))
+        if _private(t["table"]):
+            raise PermissionError(t["table"])
+        used.append(t["table"])
+        return erp.company_table(t["table"])
+
+    try:
+        final = _PLACEHOLDER.sub(expand, text)
+    except LookupError as exc:
+        return {"error": f"There's no table called {exc.args[0]!r}. Use list_tables to find it."}
+    except PermissionError:
+        return {"error": PRIVATE_MESSAGE}
+    if not used:
+        return {"error": "Name at least one table, written as {Table Name}."}
+    try:
+        rows = erp.query(final, limit=QUERY_ROWS)
+    except erp.UnsafeQuery:
+        return {"error": "Only a single read-only SELECT is allowed."}
+    except erp.ERPUnreachable:
+        raise
+    except Exception as exc:   # a mistake in the query: give the database's message back
+        orig = str(getattr(exc, "orig", exc)).strip().splitlines()[0]
+        m = _SQL_ERROR.search(orig)
+        return {"error": f"The query failed: {(m.group(1) if m else orig)[:300]}. Fix it and try again."}
+    full, out, dropped = FULL_ACCESS.get(), [], set()
+    for r in rows:
+        row = {}
+        for k, v in r.items():
+            if isinstance(v, (bytes, bytearray, memoryview)):
+                continue
+            if not full and _PRIVATE_COLUMN.search(k):
+                dropped.add(k)
+                continue
+            v = _clean(v)
+            row[k] = v[:300] + "..." if isinstance(v, str) and len(v) > 300 else v
+        out.append(row)
+    notes = []
+    if len(out) >= QUERY_ROWS:
+        notes.append(f"Only the first {QUERY_ROWS} rows came back: use GROUP BY, totals or filters "
+                     f"to cover everything.")
+    if dropped:
+        notes.append("Private columns were left out: " + ", ".join(sorted(dropped)) + ".")
+    return {"tables": used, "row_count": len(out), "rows": out, "note": " ".join(notes)}
 
 
 # --------------------------------------------------- what the model is told
@@ -779,8 +955,9 @@ LOOKUPS = {
                        {"months": dict(_STR, description="Number of months back, 1-36 (default 12)")}, []),
     "contract_billing": (contract_billing, "What was invoiced on service contracts (posted contract "
                          "invoices): total amount and number of invoices for one contract, one customer "
-                         "or all contracts, optionally between two dates; per month; the top contracts "
-                         "and top customers by amount invoiced; and the invoices themselves. Use it for billing, invoiced "
+                         "or all contracts, optionally between two dates; per month; every contract and "
+                         "every customer by amount invoiced; each contract per month (to compare periods); "
+                         "and the invoices themselves. Leave the dates empty for all time. Use it for billing, invoiced "
                          "revenue and 'how much did we bill' questions.",
                          {"contract_no": dict(_STR, description="Optional contract number, e.g. SC00123"),
                           "customer_no": dict(_STR, description="Optional customer number, e.g. C00123"),
@@ -794,9 +971,24 @@ LOOKUPS = {
                      {"date_from": dict(_STR, description="First day, YYYY-MM-DD (default today)"),
                       "date_to": dict(_STR, description="Last day, YYYY-MM-DD (default 6 days later)"),
                       "group": dict(_STR, description="Optional resource group code, as the lookup returns it")}, []),
+    "list_tables": (list_tables, "List the company's ERP tables that hold data, with row counts, "
+                    "optionally only those whose name contains some words (e.g. 'service', 'contract', "
+                    "'resource', 'item'). Use it to find where data is kept when no other lookup fits.",
+                    {"search": dict(_STR, description="Optional words the table name must contain")}, []),
+    "describe_table": (describe_table, "The columns (names and types) and row count of one ERP table, "
+                       "before writing a query on it.",
+                       {"table": dict(_STR, description="Table name as list_tables shows it")}, ["table"]),
+    "run_query": (run_query, "Run one read-only SQL Server SELECT on the company's ERP tables, for "
+                  "questions no other lookup answers, or to get complete lists and totals. Write each "
+                  "table as {Table Name} (e.g. SELECT [No_], [Name] FROM {Customer} WHERE [City] = "
+                  "'KISUMU'), and columns in [brackets] exactly as describe_table shows them. Prefer "
+                  "COUNT/SUM/GROUP BY over long lists; at most 200 rows come back.",
+                  {"sql": dict(_STR, description="One SELECT statement, tables as {Table Name}")}, ["sql"]),
     "data_quality": (data_quality, "Gaps in the ERP data: service items without a group, customer or "
                      "serial number, or never serviced; customers without city or salesperson; contracts "
-                     "not signed or missing a customer, description or next invoice date.", {}, []),
+                     "not signed or missing a customer, description or next invoice date; and active "
+                     "contracts that have never been invoiced (missing revenue). Use it for questions "
+                     "about missing, incomplete or inaccurate data.", {}, []),
 }
 
 
@@ -846,6 +1038,7 @@ EXAMPLE_QUESTIONS = [
     # follow-ups and data gaps
     ("Which customers have services but no active contract?", ["customers_without_active_contract"]),
     ("How complete is our ERP data? What's missing?", ["data_quality"]),
+    ("Which contracts have missing revenue or other gaps that affect our reports?", ["data_quality"]),
     # combined (several lookups)
     ("Do our top 3 customers by services all have active contracts?",
      ["rank_customers", "find_contracts"]),
@@ -862,13 +1055,14 @@ EXAMPLE_QUESTIONS = [
 # mode never looks anything up.
 SALES_LOOKUPS = {"find_customers", "blocked_customers", "customer_breakdown", "rank_customers",
                  "customers_without_active_contract"}
+GENERAL_TOOLS = {"list_tables", "describe_table", "run_query"}   # both modes, any table
 
 
 def lookups_for(mode):
     if mode == "service":
         return set(LOOKUPS)
     if mode == "sales":
-        return set(SALES_LOOKUPS)
+        return set(SALES_LOOKUPS) | GENERAL_TOOLS
     return set()
 
 
@@ -909,7 +1103,7 @@ def run_lookup(name, args):
         return {"error": f"The ERP database couldn't be reached right now ({type(exc).__name__})."}
 
 
-def instructions(app=None, mode="service"):
+def instructions(app=None, mode="service", full_access=False):
     company = (app or current_app).config.get("ERP_COMPANY", "")
     allowed = lookups_for(mode)
     examples = "\n".join(f"- {q} -> {' + '.join(names)}" for q, names in EXAMPLE_QUESTIONS
@@ -918,10 +1112,11 @@ def instructions(app=None, mode="service"):
         scope = (f"Live ERP data: you can look up the company's customers in Dynamics NAV (company "
                  f"{company}) with the provided functions: finding customers, blocked customers, "
                  f"customer rankings and breakdowns (by city, salesperson, branch), and customers "
-                 f"without an active contract. This company's ERP data has no quotations, sales "
-                 f"orders or sales invoices, so say so if asked for them. Service items, guard "
-                 f"posts, alarms and service contracts belong to Service mode: if asked about "
-                 f"them, say it's a Service question and to choose Service at the top of the chat.")
+                 f"without an active contract, and with the general tools any other customer or sales "
+                 f"table. This company's ERP data has no quotations, sales orders or sales invoices, "
+                 f"so say so if asked for them. Service items, guard posts, alarms, service contracts "
+                 f"and contract billing belong to Service mode: if asked about them, say it's a "
+                 f"Service question and to choose Service at the top of the chat.")
     else:
         scope = (f"Live ERP data: you can look up the company's Dynamics NAV data (company {company}) "
                  f"with the provided functions: customers, their service items (guard posts, alarm "
@@ -932,28 +1127,54 @@ def instructions(app=None, mode="service"):
                  f"recent changes, contract trends, customers without an active contract, gaps "
                  f"in the data, what was invoiced on contracts (billing per contract, customer or "
                  f"month), and how many staff are rostered on the service time sheets.")
+    access = ("(For you, not to repeat: the person you're talking to is an admin, so they may see "
+              "payroll, HR, bank and system tables and private columns; answer those questions with the "
+              "tools, for example payroll totals from {Payroll Transaction Ledger}, where earnings have "
+              "codes starting with E and deductions with D.)"
+              if full_access else
+              "(For you, not to repeat: the person you're talking to isn't an admin, so payroll, HR, bank "
+              "and system tables and private columns are closed to them. If they ask for those, tell them "
+              "in your own words that only admins can see that data, and offer what you can show.)")
     return f"""
 
 Today is {dt.date.today().isoformat()}; work out dates like "this year" or "next week" from it.
-{scope} Use a lookup whenever the user asks about a specific
+{scope}
+Any question about the company's own records in the ERP, whatever table they're in (HR and
+payroll too), belongs in this mode: look it up, never send it to General.
+{access} Use a lookup whenever the user asks about a specific
 customer, service, contract, a count, a ranking or a comparison; never guess or invent ERP
 data. For harder questions, call several lookups (in the same turn when they don't depend
 on each other) and combine the results; do the arithmetic (totals, differences,
 percentages) yourself from the numbers returned. If a question is ambiguous, answer the
 most likely reading and say which one you used.
 
-Say briefly that the figures come from the ERP. If a lookup finds nothing or fails, say so
-plainly. If a list was cut short (a "note" says so), say that it's a partial list. The only
-invoice data is what was invoiced on service contracts (contract_billing, in Service mode);
-there is no payment, balance or profit data, and you can't see employees' names, payroll,
-salaries or personal ID numbers; say so if asked. Contract profitability can't be worked out
-because staff costs aren't linked to contracts in the ERP (the time sheets don't record the
-contract). Customer numbers look like the "number" values the lookups return.
+Reading any table: besides the specific lookups, list_tables, describe_table and run_query
+read any other table of this company. Prefer a specific lookup when one fits (it already
+uses the right business rules, such as what counts as an active contract). Otherwise, or
+to get a complete list or total, find the table with list_tables, read its columns with
+describe_table, then run_query with each table written as {{Table Name}} and columns in
+[brackets] exactly as described. Notes for writing queries: NAV's empty date is
+1753-01-01; option fields are numbers (0, 1, 2...); in the Service Ledger Entry, [Entry
+Type] 1 is a sale and sale amounts are stored negative. If a query fails, read the error,
+fix the query and try again. Never stop at "I can't see that" without checking the tables.
 
-Answer what you can, straight away. If only part of a question can be answered (for
-example profit, payroll or staff per contract), run the lookups for the parts you can
-answer (such as what was invoiced) and show those results in this reply, then say in one
-sentence what's missing and why. Don't ask "would you like to see...?" first.
+Be complete. Include every row a lookup returned unless the user asked for a top N; never
+leave out items, and never shorten a list without saying how many there are in total. If
+a "note" says a list was cut short, say so and give the full count. Answer every part of
+the question, in the order asked; for each part you can't answer, say which part and why.
+
+Answer what you can, straight away. Run the lookups for the parts you can answer and show
+those results in this reply; don't ask "would you like to see...?" first.
+
+Periods: say which period every figure covers (lookups return it, e.g. "period"). If the
+user didn't give a period, don't add one: use all the data and say so. To compare periods
+(for example June and July), show each contract's or customer's figure in each period and
+the change, and point out the ones that went down.
+
+Reports and recommendations: build them from the ERP figures you looked up (for example
+contracts and customers by amount invoiced, highest and lowest, and gaps in the data), and
+base each recommendation on those figures. Don't recommend reports or features you can't
+see, and don't offer to escalate to a support team.
 
 "Revenue", "income" or "how much did we bill" means what was invoiced (contract_billing);
 use the yearly contract value (annual amount) only when the user asks for contract value,
@@ -962,6 +1183,16 @@ or as an extra column you clearly label.
 Report every date, amount and status exactly as a lookup returned it, with its own label.
 Never present the period the user asked about as a contract's dates: a contract's start,
 end and invoice dates come only from contract_details or find_contracts.
+
+Private data: payroll, HR, bank and system tables, and private columns (ID and social
+security numbers, bank accounts, salaries, birth dates), can only be read by admins. If a
+tool says something is private, tell the user only admins can see it. Contract
+profitability per contract can't be worked out, because the time sheets don't record the
+contract, so staff costs can't be linked to contracts; say so, and show what was invoiced.
+Say briefly that the figures come from the ERP. If a lookup finds nothing or fails, say so
+plainly. Customer numbers look like the "number" values the lookups return. Amounts are in
+the company's own currency: write them as plain numbers with thousands separators, never
+with a $ or any other currency sign.
 
 Examples of questions and the lookups that answer them:
 {examples}"""

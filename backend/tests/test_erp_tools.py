@@ -342,7 +342,7 @@ def test_examples_and_guidance_reach_the_model(app):
 
 def test_every_lookup_is_declared_to_the_model():
     declared = {d.name for d in erp_tools.gemini_tool().function_declarations}
-    assert declared == set(erp_tools.LOOKUPS) and len(declared) == 17
+    assert declared == set(erp_tools.LOOKUPS) and len(declared) == 20
 
 
 def test_rank_customers_by_services_and_value(app, fake_query):
@@ -511,7 +511,7 @@ def test_each_mode_gets_only_its_own_lookups():
     service = {d.name for d in erp_tools.gemini_tool(mode="service").function_declarations}
     sales = {d.name for d in erp_tools.gemini_tool(mode="sales").function_declarations}
     assert service == set(erp_tools.LOOKUPS)
-    assert sales == erp_tools.SALES_LOOKUPS and sales < service
+    assert sales == erp_tools.SALES_LOOKUPS | erp_tools.GENERAL_TOOLS and sales < service
     assert not sales & {"customer_services", "service_item", "find_contracts", "contract_summary"}
     assert erp_tools.lookups_for("general") == set()
 
@@ -627,7 +627,7 @@ def test_contract_billing_for_everyone_lists_top_contracts(app, fake_query):
     with app.app_context():
         r = erp_tools.contract_billing(date_from="not a date")
     assert len(fake_query.calls) == 4 and "invoices" not in r
-    assert "top_contracts" in r and "top_customers" in r
+    assert "contracts_by_amount" in r and "customers_by_amount" in r and r["period"] == "all time"
     assert "GROUP BY s.[Customer No_]" in fake_query.calls[3][0]
     assert "Customer]" in fake_query.calls[2][0] and r["note"].startswith("No posted contract invoices")
     assert str(fake_query.calls[0][1]["df"]) == "1753-01-02"      # bad date -> no lower limit
@@ -659,7 +659,7 @@ def test_billing_and_roster_are_service_only(app):
     app.config.update(ERP)
     with app.app_context():
         text = erp_tools.instructions(mode="service")
-    assert "contract_billing" in text and "profitability can't be worked out" in text
+    assert "contract_billing" in text and "can't be worked out" in text
     assert "Today is 20" in text
 
 
@@ -667,7 +667,7 @@ def test_answer_rules_for_partial_and_revenue_questions(app):
     app.config.update(ERP)
     with app.app_context():
         text = erp_tools.instructions(mode="service")
-    assert "Answer what you can, straight away" in text and "Don't ask \"would you like" in text
+    assert "Answer what you can, straight away" in text and "don't ask \"would you like" in text
     assert "means what was invoiced (contract_billing)" in text
     assert "Never present the period the user asked about as a contract's dates" in text
 
@@ -708,3 +708,141 @@ def test_what_counts_as_an_unsupported_erp_claim():
     assert ai_service._unsupported_erp_claim("According to the ERP, 322 invoices were posted.")
     assert not ai_service._unsupported_erp_claim("Profit can't be worked out from the ERP.")
     assert not ai_service._unsupported_erp_claim("Step 1: open the Service module.")
+
+
+
+# ------------------------------------------------------- read any table
+@pytest.fixture
+def tables(app, fake_query, monkeypatch):
+    erp_tools._tables_cache.update(at=0.0, company=None, tables=[])
+    monkeypatch.setattr(erp, "company_tables", lambda with_rows_only=False: [
+        {"table": "Customer", "row_count": 5}, {"table": "Service Item", "row_count": 9},
+        {"table": "Payroll Transaction Ledger", "row_count": 7}, {"table": "Employee", "row_count": 3},
+        {"table": "Empty Table", "row_count": 0}])
+    monkeypatch.setattr(erp, "table_columns", lambda t, company=None: [
+        {"column_name": "timestamp", "type": "timestamp"}, {"column_name": "No_", "type": "nvarchar"},
+        {"column_name": "Name", "type": "nvarchar"}, {"column_name": "Social Security No_", "type": "nvarchar"}])
+    return fake_query
+
+
+def test_list_tables_hides_private_ones_unless_admin(app, tables):
+    with app.app_context():
+        r = erp_tools.list_tables()
+        assert [t["table"] for t in r["tables"]] == ["Customer", "Service Item"]
+        assert "2 private" in r["note"]
+        token = erp_tools.FULL_ACCESS.set(True)
+        try:
+            assert len(erp_tools.list_tables()["tables"]) == 4
+        finally:
+            erp_tools.FULL_ACCESS.reset(token)
+        assert erp_tools.list_tables("service")["tables"] == [{"table": "Service Item", "rows": 9}]
+
+
+def test_describe_table_leaves_out_private_columns(app, tables):
+    with app.app_context():
+        r = erp_tools.describe_table("customer")
+        assert [c["column"] for c in r["columns"]] == ["No_", "Name"]
+        assert "private" in erp_tools.describe_table("Employee")["error"]
+        assert "list_tables" in erp_tools.describe_table("Nope")["error"]
+
+
+def test_run_query_expands_company_tables(app, tables):
+    tables.queue.append([{"No_": "C1", "Name": "Test Ltd", "Social Security No_": "x", "timestamp": b"\x00"}])
+    with app.app_context():
+        r = erp_tools.run_query("SELECT TOP 5 c.* FROM {Customer} c ORDER BY c.[Name];")
+    sql = tables.calls[-1][0]
+    assert "FROM [IDEALDYNAMICS_PROP$Customer] c" in sql and not sql.endswith(";")
+    assert r["rows"] == [{"No_": "C1", "Name": "Test Ltd"}] and "Social Security No_" in r["note"]
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT * FROM [IDEALDYNAMICS_PROP$Customer]",            # raw company table
+    "SELECT * FROM {Customer} c JOIN dbo.Users u ON 1=1",      # another table
+    "SELECT name FROM sys.tables",                              # system tables
+    "SELECT * FROM OtherDb..Customer",                          # another database
+    "SELECT * FROM OPENROWSET('SQLNCLI', 'x', 'y')",            # external data
+    "SELECT * FROM {Customer}; DROP TABLE x",                   # second statement
+    "SELECT @@VERSION FROM {Customer}",
+    "SELECT [Social Security No_] AS x FROM {Customer}",        # private column, renamed
+    "SELECT * FROM {Payroll Transaction Ledger}",               # private table
+    "SELECT * FROM {No Such Table}",
+    "SELECT 1",
+])
+def test_run_query_refuses_anything_outside_the_company(app, tables, sql):
+    with app.app_context():
+        r = erp_tools.run_query(sql)
+    assert "error" in r and not tables.calls
+
+
+def test_admin_can_read_payroll(app, tables):
+    tables.queue.append([{"total": 1}])
+    with app.app_context():
+        token = erp_tools.FULL_ACCESS.set(True)
+        try:
+            r = erp_tools.run_query("SELECT SUM([Amount]) AS total FROM {Payroll Transaction Ledger}")
+        finally:
+            erp_tools.FULL_ACCESS.reset(token)
+    assert r["rows"] == [{"total": 1}] and "[IDEALDYNAMICS_PROP$Payroll Transaction Ledger]" in tables.calls[-1][0]
+
+
+def test_common_table_expressions_are_allowed(app, tables):
+    tables.queue.append([{"n": 2}])
+    with app.app_context():
+        r = erp_tools.run_query("WITH x AS (SELECT [No_] FROM {Customer}) SELECT COUNT(*) AS n FROM x")
+    assert r["rows"] == [{"n": 2}]
+
+
+def test_query_mistakes_come_back_to_the_model(app, tables, monkeypatch):
+    def broken(sql, params=None, limit=200):
+        raise RuntimeError("[Microsoft][ODBC Driver 17 for SQL Server][SQL Server]Invalid column name 'Nme'. (207) (SQLExecDirectW)")
+    monkeypatch.setattr(erp, "query", broken)
+    with app.app_context():
+        r = erp_tools.run_query("SELECT [Nme] FROM {Customer}")
+    assert r["error"].startswith("The query failed: Invalid column name 'Nme'.")
+
+
+def test_admins_get_full_erp_access(app, client, monkeypatch):
+    from app.routes import chat
+    from app.models import User
+    app.config.update(ERP, ADMIN_EMAILS="boss@idealdynamics.co.ke", REQUIRE_EMAIL_VERIFICATION=False)
+    with app.app_context():
+        from app.extensions import db
+        for email in ("boss@idealdynamics.co.ke", "staff@idealdynamics.co.ke", "x@gmail.com"):
+            db.session.add(User(name="U", email=email, password_hash="x", email_verified=True))
+        db.session.commit()
+        ids = {u.email: u.id for u in User.query.all()}
+        conv = lambda email: SimpleNamespace(user_id=ids[email])
+        assert chat._erp_allowed(conv("boss@idealdynamics.co.ke")) == "full"
+        assert chat._erp_allowed(conv("staff@idealdynamics.co.ke")) == "standard"
+        assert chat._erp_allowed(conv("x@gmail.com")) is False
+
+
+def test_lookups_run_with_the_users_access_level(app, monkeypatch):
+    seen = []
+    monkeypatch.setattr(erp_tools, "run_lookup", lambda n, a: seen.append(erp_tools.FULL_ACCESS.get()) or {})
+    calls = [SimpleNamespace(name="list_tables", args={}, id="1")]
+    with app.app_context():
+        ai_service._lookup_responses(calls, [], "service", None, True)
+        ai_service._lookup_responses(calls, [], "service", None, False)
+    assert seen == [True, False] and erp_tools.FULL_ACCESS.get() is False
+
+
+def test_instructions_know_whether_the_user_is_an_admin(app):
+    app.config.update(ERP)
+    with app.app_context():
+        admin = erp_tools.instructions(mode="service", full_access=True)
+        staff = erp_tools.instructions(mode="service")
+    assert "talking to is an admin" in admin and " {Payroll Transaction Ledger}," in admin
+    assert "talking to isn't an admin" in staff and "only admins can see that data" in staff
+    assert "never send it to General" in staff and "never\nwith a $" in staff
+
+
+def test_data_quality_finds_active_contracts_never_invoiced(app, fake_query):
+    fake_query.queue += [[{"total": 1}], [{"total": 2}], [{"total": 3}], [{"n": 1}],
+                         [{"contract_no": "SC90001", "customer_no": "C1", "customer_name": "Test",
+                           "starting_date": None, "annual_amount": 10}]]
+    with app.app_context():
+        r = erp_tools.data_quality()
+    assert "NOT EXISTS" in fake_query.calls[3][0] and "[Entry Type] = 1" in fake_query.calls[3][0]
+    assert r["contracts"]["active_never_invoiced"] == 1
+    assert r["active_contracts_never_invoiced"][0]["contract_no"] == "SC90001"

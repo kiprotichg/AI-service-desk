@@ -104,9 +104,12 @@ def _ai_input(user_msg, prior):
 
 
 def _erp_allowed(conv):
-    """Live ERP lookups only for the chat owner's account, if its email domain is allowed."""
+    """Live ERP lookups only for the chat owner's account, if its email is allowed:
+    "full" for admins (payroll and HR too), "standard" for other approved users, else False."""
     owner = db.session.get(User, conv.user_id) if conv.user_id else None
-    return erp_tools.user_may_use(owner)
+    if not erp_tools.user_may_use(owner):
+        return False
+    return "full" if owner.is_admin else "standard"
 
 
 def _answer(conv, user_msg, prior, mode, web_search=False):
