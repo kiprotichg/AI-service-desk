@@ -342,7 +342,7 @@ def test_examples_and_guidance_reach_the_model(app):
 
 def test_every_lookup_is_declared_to_the_model():
     declared = {d.name for d in erp_tools.gemini_tool().function_declarations}
-    assert declared == set(erp_tools.LOOKUPS) and len(declared) == 20
+    assert declared == set(erp_tools.LOOKUPS) and len(declared) == 22
 
 
 def test_rank_customers_by_services_and_value(app, fake_query):
@@ -846,3 +846,77 @@ def test_data_quality_finds_active_contracts_never_invoiced(app, fake_query):
     assert "NOT EXISTS" in fake_query.calls[3][0] and "[Entry Type] = 1" in fake_query.calls[3][0]
     assert r["contracts"]["active_never_invoiced"] == 1
     assert r["active_contracts_never_invoiced"][0]["contract_no"] == "SC90001"
+
+
+# ------------------------------------------------ comparisons and reports
+def test_compare_billing_lists_every_contract_with_the_change(app, fake_query):
+    fake_query.queue.append([
+        {"id": "SC1", "customer_no": "C1", "customer_name": "A", "first_amount": 100, "second_amount": 0},
+        {"id": "SC2", "customer_no": "C2", "customer_name": "B", "first_amount": 50, "second_amount": 50},
+        {"id": "SC3", "customer_no": "C3", "customer_name": "C", "first_amount": 0, "second_amount": 30},
+        {"id": "SC4", "customer_no": "C4", "customer_name": "D", "first_amount": 80, "second_amount": 60}])
+    with app.app_context():
+        r = erp_tools.compare_billing("2026-06", second_from="2026-07")
+    sql, params = fake_query.calls[0]
+    assert str(params["a1"]) == "2026-06-01" and str(params["a2"]) == "2026-06-30"
+    assert str(params["b1"]) == "2026-07-01" and str(params["b2"]) == "2026-07-31"
+    assert "GROUP BY s.[Service Contract No_]" in sql
+    assert [(i["contract_no"], i["trend"]) for i in r["items"]] == [
+        ("SC1", "stopped"), ("SC4", "declined"), ("SC2", "unchanged"), ("SC3", "new")]
+    assert r["went_down_count"] == 2 and r["first_period_total"] == 230 and r["total_change"] == -90
+    assert r["items"][1]["change_percent"] == -25.0
+
+
+def test_compare_billing_by_customer_and_bad_input(app, fake_query):
+    with app.app_context():
+        assert "error" in erp_tools.compare_billing("June", second_from="July")
+        erp_tools.compare_billing("2026-01-01", "2026-03-31", "2026-04-01", "2026-06-30", by="customer")
+    assert "GROUP BY s.[Customer No_]" in fake_query.calls[0][0]
+
+
+def test_contract_report_has_top_and_lowest(app, monkeypatch):
+    ranked = [{"contract_no": f"SC{i}", "amount_invoiced": 100 - i} for i in range(12)]
+    monkeypatch.setattr(erp_tools, "contract_billing", lambda **kw: {
+        "period": "all time", "amount_invoiced": 1, "invoice_count": 2, "contracts": 12, "customers": 3,
+        "contracts_by_amount": ranked, "customers_by_amount": [], "per_month": []})
+    monkeypatch.setattr(erp_tools, "data_quality", lambda: {
+        "contracts": {"not_signed": 1}, "active_contracts_never_invoiced": [{"contract_no": "SC99"}]})
+    with app.app_context():
+        r = erp_tools.contract_report(top="3")
+    assert [c["contract_no"] for c in r["top_contracts"]] == ["SC0", "SC1", "SC2"]
+    assert [c["contract_no"] for c in r["lowest_contracts"]] == ["SC11", "SC10", "SC9"]
+    assert len(r["all_contracts_by_amount"]) == 12 and r["active_contracts_never_invoiced"]
+    assert "can't be linked" in r["cannot_show"]
+
+
+def test_what_counts_as_asking_instead_of_answering():
+    ask = ai_service._asks_instead_of_answering
+    assert ask("I can compare the revenue instead. Would you like me to do that?")
+    assert ask("Would you like me to proceed with a report for all time?")
+    assert not ask("SC1: 123,456.78 in June, 0 in July. SC2: 1,234.56 both months. "
+                   "Let me know if you would like more detail.")
+    assert not ask("Step 1: open Service. Step 2: choose New.")
+
+
+class AsksFirstGemini(LookupGemini):
+    """First offers to do it; once told to do it now, answers with figures."""
+    def _stream(self, **kw):
+        self.calls.append(kw)
+        last = kw["contents"][-1].parts[0]
+        text = ("June 123,456.78 and July 12,345.67, per the ERP."
+                if getattr(last, "text", None) == ai_service.DO_IT_NOW else
+                "Profit can't be worked out, but I can compare invoiced revenue. Would you like that?")
+        part = SimpleNamespace(function_call=None, text=text, thought=False)
+        return iter([SimpleNamespace(text=text, candidates=[SimpleNamespace(content=SimpleNamespace(parts=[part]))])])
+
+
+def test_an_answer_that_only_offers_is_redone(app, client, monkeypatch):
+    _, _, conv = _setup(app, monkeypatch, client, "jane@idealdynamics.co.ke")
+    fake = AsksFirstGemini()
+    monkeypatch.setattr(ai_service, "_get_gemini_client", lambda: fake)
+    res = client.post(f"/api/conversations/{conv['id']}/messages?stream=1",
+                      headers={"X-Conversation-Token": conv["token"]},
+                      json={"content": "Compare profitability June vs July", "mode": "service"})
+    events = [json.loads(line) for line in res.get_data(as_text=True).splitlines()]
+    assert [e["type"] for e in events].count("reset") == 1 and len(fake.calls) == 2
+    assert events[-1]["reply"]["content"].startswith("June 123,456.78")
