@@ -168,7 +168,7 @@ export const api = {
    * promise resolves with the final {type: "done", reply, conversation, ticket, ...}.
    */
   sendMessageStream: async (id, token, content, files = [], mode = "service", webSearch = false,
-    onEvent = () => {}) => {
+    onEvent = () => {}, company = "") => {
     const headers = asCustomer(token);
     let body;
     if (files.length) {
@@ -176,10 +176,11 @@ export const api = {
       body.append("content", content);
       body.append("mode", mode);
       body.append("web_search", webSearch ? "true" : "false");
+      if (company) body.append("company", company);
       files.forEach((f) => body.append("files", f, f.name));
     } else {
       headers["Content-Type"] = "application/json";
-      body = JSON.stringify({ content, mode, web_search: webSearch });
+      body = JSON.stringify({ content, mode, web_search: webSearch, company });
     }
     const res = await fetch(`${BASE}/conversations/${id}/messages?stream=1`,
       { method: "POST", headers, body });
@@ -210,13 +211,13 @@ export const api = {
     return final;
   },
   /** Replace the latest assistant reply with a new answer. */
-  regenerate: (id, token, messageId, mode, webSearch = false) =>
+  regenerate: (id, token, messageId, mode, webSearch = false, company = "") =>
     request(`/conversations/${id}/messages/${messageId}/regenerate`,
-      { method: "POST", body: { mode, web_search: webSearch }, headers: asCustomer(token) }),
+      { method: "POST", body: { mode, web_search: webSearch, company }, headers: asCustomer(token) }),
   /** Change one of your messages; the replies after it are replaced by a new answer. */
-  editMessage: (id, token, messageId, content, mode, webSearch = false) =>
+  editMessage: (id, token, messageId, content, mode, webSearch = false, company = "") =>
     request(`/conversations/${id}/messages/${messageId}`,
-      { method: "PATCH", body: { content, mode, web_search: webSearch }, headers: asCustomer(token) }),
+      { method: "PATCH", body: { content, mode, web_search: webSearch, company }, headers: asCustomer(token) }),
 
   // projects (folders of chats; need an account)
   listProjects: () => userRequest("/projects"),

@@ -33,16 +33,20 @@ def client(app):
 
 @pytest.fixture
 def fake_query(app, monkeypatch):
-    """erp.query stand-in: records SQL and params, returns rows queued per call."""
+    """erp.query stand-in: records SQL and params, returns rows queued per call, or the
+    rows of the first route whose text appears in the SQL."""
     app.config.update(ERP)
-    calls, queue = [], []
+    calls, queue, routes = [], [], []
 
     def query(sql, params=None, limit=200):
         erp.check_read_only(sql)          # the real safety check still applies
         calls.append((sql, params or {}))
+        for text, rows in routes:
+            if text in sql:
+                return rows
         return queue.pop(0) if queue else []
     monkeypatch.setattr(erp, "query", query)
-    return SimpleNamespace(calls=calls, queue=queue)
+    return SimpleNamespace(calls=calls, queue=queue, routes=routes)
 
 
 # -------------------------------------------------------------------- access
@@ -342,7 +346,7 @@ def test_examples_and_guidance_reach_the_model(app):
 
 def test_every_lookup_is_declared_to_the_model():
     declared = {d.name for d in erp_tools.gemini_tool().function_declarations}
-    assert declared == set(erp_tools.LOOKUPS) and len(declared) == 20
+    assert declared == set(erp_tools.LOOKUPS) and len(declared) == 21
 
 
 def test_rank_customers_by_services_and_value(app, fake_query):
@@ -659,7 +663,7 @@ def test_billing_and_roster_are_service_only(app):
     app.config.update(ERP)
     with app.app_context():
         text = erp_tools.instructions(mode="service")
-    assert "contract_billing" in text and "can't be worked out" in text
+    assert "contract_billing" in text and "contract_profitability (admins only)" in text
     assert "Today is 20" in text
 
 
@@ -846,3 +850,110 @@ def test_data_quality_finds_active_contracts_never_invoiced(app, fake_query):
     assert "NOT EXISTS" in fake_query.calls[3][0] and "[Entry Type] = 1" in fake_query.calls[3][0]
     assert r["contracts"]["active_never_invoiced"] == 1
     assert r["active_contracts_never_invoiced"][0]["contract_no"] == "SC90001"
+
+
+def test_renamed_column_points_the_ai_to_the_current_layout(app, monkeypatch):
+    """After an ERP upgrade renames a column, the answer still comes, via describe/run_query."""
+    app.config.update(ERP)
+
+    def broken(**kwargs):
+        raise RuntimeError("(207, b\"Invalid column name 'Search Name'.DB-Lib error message 20018\")")
+    monkeypatch.setitem(erp_tools.LOOKUPS, "find_customers",
+                        (broken,) + erp_tools.LOOKUPS["find_customers"][1:])
+    with app.app_context():
+        result = erp_tools.run_lookup("find_customers", {"query": "bank"})
+    assert "column Search Name not found" in result["error"]
+    assert "describe_table" in result["error"] and "run_query" in result["error"]
+    assert "couldn't be reached" not in result["error"]
+
+
+def test_missing_table_is_reported_as_a_layout_change():
+    assert erp_tools._schema_change(Exception("Invalid object name 'IDEALDYNAMICS_PROP$Service Item'.")) \
+        == "table IDEALDYNAMICS_PROP$Service Item not found"
+    assert erp_tools._schema_change(Exception("Login failed")) == ""
+
+
+# ------------------------------------------------------------ profitability
+def _profit_routes(fake_query, with_pay=True):
+    fake_query.routes += [
+        ("SUM(s.[Amount (LCY)])", [{"revenue": decimal.Decimal("100000"), "invoices": 2}]),
+        ("SELECT TOP 100 d.[Resource No_]", [{"staff_no": "RS-1", "on_contract": 30}, {"staff_no": "RS-2", "on_contract": 10}]),
+        ("d.[Contract No_] = :c AND d.[Resource No_] IN", [   # time on this contract, per month
+            {"staff_no": "RS-1", "y": 2026, "m": 5, "q": 30}, {"staff_no": "RS-2", "y": 2026, "m": 5, "q": 10}]),
+        ("WHERE d.[Resource No_] IN", [                       # time on everything, per month
+            {"staff_no": "RS-1", "y": 2026, "m": 5, "q": 30}, {"staff_no": "RS-2", "y": 2026, "m": 5, "q": 40}]),
+        ("e.[Resource No_] IN", [{"emp": "E-2", "res": "RS-2"}]),   # RS-2 is employee E-2
+        ("Payroll Transaction Ledger", [
+            {"emp": "RS-1", "y": 2026, "m": 5, "gross": 30000, "employer": 3000}] + (
+            [{"emp": "E-2", "y": 2026, "m": 5, "gross": 20000, "employer": 0}] if with_pay else [])),
+    ]
+
+
+def test_profitability_is_for_admins_only(app, fake_query):
+    with app.app_context():
+        result = erp_tools.run_lookup("contract_profitability", {"contract_no": "SC0105"})
+    assert result["error"] == erp_tools.PRIVATE_MESSAGE and fake_query.calls == []   # nothing read
+
+
+def test_profitability_shares_salary_by_time_on_the_contract(app, fake_query):
+    _profit_routes(fake_query)
+    with app.app_context():
+        tok = erp_tools.FULL_ACCESS.set(True)
+        r = erp_tools.run_lookup("contract_profitability",
+                                 {"contract_no": "sc0105", "date_from": "2026-05", "date_to": "2026-05"})
+        erp_tools.FULL_ACCESS.reset(tok)
+    # RS-1: all May time here -> 33,000. RS-2 (employee E-2): 10 of 40 hours here -> 5,000.
+    assert r["revenue"] == 100000 and r["staff_cost"] == 38000 and r["profit"] == 62000
+    assert r["margin_percent"] == 62.0 and r["staff_fully_costed"] == 2
+    rs2 = next(s for s in r["staff"] if s["staff_no"] == "RS-2")
+    assert rs2["employee_no"] == "E-2" and rs2["cost_charged"] == 5000
+    assert r["period"] == "2026-05-01 to 2026-05-31" and r["contract_no"] == "SC0105"
+
+
+def test_profitability_flags_missing_payroll(app, fake_query):
+    _profit_routes(fake_query, with_pay=False)
+    with app.app_context():
+        tok = erp_tools.FULL_ACCESS.set(True)
+        r = erp_tools.run_lookup("contract_profitability", {"contract_no": "SC0105", "date_from": "2026-05"})
+        erp_tools.FULL_ACCESS.reset(tok)
+    assert r["staff_fully_costed"] == 1 and any("overstated" in n for n in r["notes"])
+    assert next(s for s in r["staff"] if s["staff_no"] == "RS-2")["months_without_payroll"] == ["2026-05"]
+
+
+# ------------------------------------------------------------ choosing a company
+def test_company_list_and_choice(app):
+    app.config.update(ERP, ERP_COMPANIES=" IDEALDYNAMICS , IDEALDYNAMICS_PROP,")
+    with app.app_context():
+        assert erp.companies() == ["IDEALDYNAMICS_PROP", "IDEALDYNAMICS"]   # default first, no repeats
+        assert erp.pick_company("IDEALDYNAMICS") == "IDEALDYNAMICS"
+        assert erp.pick_company("CRONUS International Ltd.") == "IDEALDYNAMICS_PROP"   # not offered
+        assert erp.company_table("Customer") == "[IDEALDYNAMICS_PROP$Customer]"
+        tok = erp.ACTIVE_COMPANY.set("IDEALDYNAMICS")
+        assert erp.company_table("Customer") == "[IDEALDYNAMICS$Customer]"
+        erp.ACTIVE_COMPANY.reset(tok)
+
+
+def test_me_lists_companies_for_erp_users_only(app, client):
+    app.config.update(ERP, ERP_COMPANIES="IDEALDYNAMICS")
+    for email, expected in [("jane@idealdynamics.co.ke", ["IDEALDYNAMICS_PROP", "IDEALDYNAMICS"]),
+                            ("eve@gmail.com", None)]:
+        token = client.post("/api/users/register", json={"name": "X", "email": email,
+                                                         "password": "Secret123"}).get_json()["token"]
+        me = client.get("/api/users/me", headers={"X-User-Token": token}).get_json()
+        assert me.get("erp_companies") == expected
+
+
+def test_the_chosen_company_is_read_and_named(app, client, monkeypatch):
+    fake, looked_up, conv = _setup(app, monkeypatch, client, "jane@idealdynamics.co.ke")
+    app.config["ERP_COMPANIES"] = "IDEALDYNAMICS"
+    tables = []
+    monkeypatch.setattr(erp_tools, "run_lookup",
+                        lambda name, args: tables.append(erp.company_table("Customer")) or {"customers": []})
+    res = client.post(f"/api/conversations/{conv['id']}/messages?stream=1",
+                      headers={"X-Conversation-Token": conv["token"]},
+                      json={"content": "How many services does Kenya Bank have?", "mode": "service",
+                            "company": "IDEALDYNAMICS"})
+    done = [json.loads(line) for line in res.get_data(as_text=True).splitlines()][-1]
+    assert tables == ["[IDEALDYNAMICS$Customer]"]           # lookups read the chosen company
+    assert "(IDEALDYNAMICS)" in done["reply"]["erp_note"]   # and the note names it
+    assert erp.ACTIVE_COMPANY.get() == ""                   # nothing leaks to the next request

@@ -9,7 +9,7 @@ from ..auth import (agent_required, current_agent, current_user, has_conversatio
                     issue_conversation_token, unauthorized)
 from ..extensions import db
 from ..models import Conversation, Message, Project, Ticket, User, utcnow
-from ..services import ai_service, attachments, erp_tools
+from ..services import ai_service, attachments, erp, erp_tools
 
 bp = Blueprint("chat", __name__, url_prefix="/api/conversations")
 
@@ -112,15 +112,22 @@ def _erp_allowed(conv):
     return "full" if owner.is_admin else "standard"
 
 
-def _answer(conv, user_msg, prior, mode, web_search=False):
+def _erp_company(access, requested):
+    """The company to read for this message: the one picked in the chat if allowed."""
+    return erp.pick_company(requested) if access else ""
+
+
+def _answer(conv, user_msg, prior, mode, web_search=False, company=""):
     """Ask the AI to reply to user_msg (given the earlier messages) and store the reply.
 
     Shared by sending, regenerating and editing. Opens or updates the chat's ticket.
     Returns (ai_reply, assistant_message, ticket_or_None).
     """
     history, current_parts = _ai_input(user_msg, prior)
+    access = _erp_allowed(conv)
     ai = ai_service.generate_reply(history, user_msg.content, current_parts, mode=mode,
-                                   web_search=web_search, erp_lookups=_erp_allowed(conv))
+                                   web_search=web_search, erp_lookups=access,
+                                   erp_company=_erp_company(access, company))
     bot_msg, ticket = _store_answer(conv, user_msg, ai, mode)
     return ai, bot_msg, ticket
 
@@ -157,7 +164,7 @@ def _ndjson(obj):
     return json.dumps(obj) + "\n"
 
 
-def _stream_answer(conv, user_msg, prior, mode, web_search):
+def _stream_answer(conv, user_msg, prior, mode, web_search, company=""):
     """Send the answer as it's written: one JSON object per line.
 
     {"type": "start", "user_message"}, then {"type": "delta", "text"} pieces
@@ -168,6 +175,7 @@ def _stream_answer(conv, user_msg, prior, mode, web_search):
     question = user_msg.to_dict()
     conv_id, msg_id = conv.id, user_msg.id
     erp_lookups = _erp_allowed(conv)
+    erp_company = _erp_company(erp_lookups, company)
 
     def events():
         yield _ndjson({"type": "start", "user_message": question})
@@ -175,7 +183,8 @@ def _stream_answer(conv, user_msg, prior, mode, web_search):
             ai = None
             for kind, value in ai_service.stream_reply(history, question["content"], parts,
                                                        mode=mode, web_search=web_search,
-                                                       erp_lookups=erp_lookups):
+                                                       erp_lookups=erp_lookups,
+                                                       erp_company=erp_company):
                 if kind == "delta":
                     yield _ndjson({"type": "delta", "text": value})
                 elif kind == "reset":
@@ -200,8 +209,8 @@ def _stream_answer(conv, user_msg, prior, mode, web_search):
 
 
 def _reply_body(conv, ai, bot_msg, ticket, **extra):
-    erp_note = (f"Includes live data from the ERP ({current_app.config.get('ERP_COMPANY')})."
-                if ai.erp_lookups else "")
+    company = ai.erp_company or current_app.config.get("ERP_COMPANY")
+    erp_note = f"Includes live data from the ERP ({company})." if ai.erp_lookups else ""
     return {"reply": {**bot_msg.to_dict(), "notice": ai.notice, "erp_note": erp_note},
             "source": ai.source,
             "conversation": conv.to_dict(),
@@ -241,8 +250,10 @@ def send_message(conv_id):
         conv.title = (content or new_files[0].filename)[:60]
     if request.args.get("stream") == "1":
         db.session.commit()   # the question is kept even if answering fails
-        return _stream_answer(conv, user_msg, prior, mode, _flag(fields.get("web_search")))
-    ai, bot_msg, ticket = _answer(conv, user_msg, prior, mode, _flag(fields.get("web_search")))
+        return _stream_answer(conv, user_msg, prior, mode, _flag(fields.get("web_search")),
+                              fields.get("company"))
+    ai, bot_msg, ticket = _answer(conv, user_msg, prior, mode, _flag(fields.get("web_search")),
+                                  fields.get("company"))
     db.session.commit()
     return jsonify(_reply_body(conv, ai, bot_msg, ticket,
                                user_message=user_msg.to_dict())), 201
@@ -269,7 +280,7 @@ def regenerate_reply(conv_id, message_id):
     old_reply, user_msg = msgs[-1], msgs[-2]
     conv.messages.remove(old_reply)  # delete-orphan: the old reply row is deleted
     ai, bot_msg, ticket = _answer(conv, user_msg, msgs[:-2], mode,
-                                  _flag(data.get("web_search")))
+                                  _flag(data.get("web_search")), data.get("company"))
     db.session.commit()
     return jsonify(_reply_body(conv, ai, bot_msg, ticket, replaced_id=message_id,
                                user_message=user_msg.to_dict())), 201
@@ -310,7 +321,8 @@ def edit_message(conv_id, message_id):
     prior = [m for m in msgs if m.id < target.id]
     if not any(m.role == "user" for m in prior):  # the first question names the chat
         conv.title = (content or target.attachments[0].filename)[:60]
-    ai, bot_msg, ticket = _answer(conv, target, prior, mode, _flag(data.get("web_search")))
+    ai, bot_msg, ticket = _answer(conv, target, prior, mode, _flag(data.get("web_search")),
+                                  data.get("company"))
     db.session.commit()
     attachments.delete_files(removed_files)  # only after the rows are gone
     return jsonify(_reply_body(conv, ai, bot_msg, ticket, user_message=target.to_dict(),

@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 
 from flask import current_app, has_app_context
 
-from . import erp_tools, knowledge_base
+from . import erp, erp_tools, knowledge_base
 
 log = logging.getLogger(__name__)
 
@@ -206,12 +206,13 @@ class AIReply:
     suggestions: list = field(default_factory=list)  # follow-up questions to offer
     sources: list = field(default_factory=list)      # [{"title", "url"}] from web search
     erp_lookups: list = field(default_factory=list)  # names of ERP lookups the answer used
+    erp_company: str = ""                            # the ERP company those lookups read
     notice: str = ""                                  # e.g. web search couldn't be used
     source: str = "offline"  # "claude" | "gemini" | "offline"
 
 
 def generate_reply(history, user_message, attachments=(), mode="service", web_search=False,
-                   erp_lookups=False):
+                   erp_lookups=False, erp_company=""):
     """Reply to user_message (plus any uploaded files).
 
     history: [{"role", "content", "attachments": [FilePart]}] oldest first,
@@ -230,7 +231,7 @@ def generate_reply(history, user_message, attachments=(), mode="service", web_se
     if erp_lookups and _uses_erp(mode):
         reply = None
         for kind, value in stream_reply(history, user_message, attachments, mode, web_search,
-                                        erp_lookups=True):
+                                        erp_lookups=erp_lookups, erp_company=erp_company):
             if kind == "done":
                 reply = value
         return reply
@@ -332,8 +333,29 @@ def _uses_erp(mode):
 
 
 def stream_reply(history, user_message, attachments=(), mode="service", web_search=False,
-                 erp_lookups=False):
+                 erp_lookups=False, erp_company=""):
     """Like generate_reply, but yields the answer while it's being written.
+
+    erp_company: which ERP company the lookups read (one of erp.companies()).
+    """
+    token = erp.ACTIVE_COMPANY.set(erp_company) if erp_company else None
+    try:
+        for kind, value in _stream_reply(history, user_message, attachments, mode, web_search,
+                                         erp_lookups):
+            if kind == "done" and value is not None and value.erp_lookups:
+                value.erp_company = erp.current_company()
+            yield kind, value
+    finally:
+        if token is not None:
+            try:
+                erp.ACTIVE_COMPANY.reset(token)
+            except ValueError:   # finished in another context (e.g. a closed stream)
+                erp.ACTIVE_COMPANY.set("")
+
+
+def _stream_reply(history, user_message, attachments=(), mode="service", web_search=False,
+                  erp_lookups=False):
+    """The body of stream_reply.
 
     Yields ("delta", text) pieces, possibly ("reset", None) if a half-written answer
     had to be thrown away, and finally ("done", AIReply). Gemini streams for real;
@@ -565,13 +587,17 @@ def _lookup_responses(calls, used, mode="service", cache=None, full_access=False
         if key(call) not in done:
             unique.setdefault(key(call), call)
 
+    company = erp.current_company()   # carried into the threads below
+
     def run_one(call):
         if call.name not in allowed:
             return erp_tools.not_in_this_mode(call.name, mode)
         token = erp_tools.FULL_ACCESS.set(full_access)   # payroll and HR tables: admins only
+        company_token = erp.ACTIVE_COMPANY.set(company)
         try:
             return erp_tools.run_lookup(call.name, dict(call.args or {}))
         finally:
+            erp.ACTIVE_COMPANY.reset(company_token)
             erp_tools.FULL_ACCESS.reset(token)
 
     todo = list(unique.values())

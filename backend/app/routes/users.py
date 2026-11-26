@@ -13,6 +13,7 @@ from ..auth import (conversation_from_token, current_user, issue_conversation_to
                     issue_user_token, unauthorized, user_required)
 from ..extensions import db
 from ..models import Conversation, PasswordReset, User, utcnow
+from ..services import erp, erp_tools
 from ..services.mailer import send_email
 
 log = logging.getLogger(__name__)
@@ -264,7 +265,11 @@ def login_code():
 @bp.get("/me")
 @user_required
 def me():
-    return jsonify(current_user().to_dict())
+    user = current_user()
+    body = user.to_dict()
+    if erp_tools.user_may_use(user):   # the ERP companies this user can switch between
+        body["erp_companies"] = erp.companies()
+    return jsonify(body)
 
 
 # ------------------------------------------------------------ password reset

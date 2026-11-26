@@ -58,6 +58,8 @@ class Config:
     ERP_DB_USER = os.getenv("ERP_DB_USER", "")
     ERP_DB_PASSWORD = os.getenv("ERP_DB_PASSWORD", "")
     ERP_COMPANY = os.getenv("ERP_COMPANY", "")          # e.g. IDEALDYNAMICS_PROP
+    # More companies users may switch to in the chat (comma separated); ERP_COMPANY is the default.
+    ERP_COMPANIES = os.getenv("ERP_COMPANIES", "")
     # New accounts must confirm their email with an emailed code before signing in.
     REQUIRE_EMAIL_VERIFICATION = os.getenv("REQUIRE_EMAIL_VERIFICATION", "true").lower() == "true"
     # Every sign-in needs a 6-digit code emailed to the account, after the password.
@@ -118,6 +120,7 @@ class TestConfig(Config):
     HELPDESK_NAME = "ICT Help Desk"
     HELPDESK_HOURS = ""
     ERP_DB_HOST = ERP_DB_NAME = ERP_DB_USER = ERP_DB_PASSWORD = ERP_COMPANY = ""
+    ERP_COMPANIES = ""
     ERP_ALLOWED_EMAIL_DOMAINS = ""
     ERP_ALLOWED_EMAILS = ""
     ADMIN_EMAILS = ""

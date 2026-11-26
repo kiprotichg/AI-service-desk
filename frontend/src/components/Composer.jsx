@@ -48,7 +48,8 @@ async function captureScreen() {
 export default function Composer({ text, setText, files, onAddFiles, onRemoveFile, onSubmit,
   disabled, busy, autoFocus, placeholder = "Ask anything", onError,
   webSearch, onToggleWebSearch, chatMode, onChangeMode, projects, projectId, onPickProject,
-  onNewProject, onOpenHelpdesk, onVoice, micLang, onMicLang, temporary }) {
+  onNewProject, onOpenHelpdesk, onVoice, micLang, onMicLang, temporary,
+  erpCompanies = [], erpCompany = "", onErpCompany }) {
   const inputRef = useRef(null);
   const fileRef = useRef(null);
   const plusRef = useRef(null);
@@ -163,6 +164,10 @@ export default function Composer({ text, setText, files, onAddFiles, onRemoveFil
     { label: "Add connector", icon: <ConnectorIcon width={18} height={18} />,
       submenu: [{ label: "WhatsApp ICT help desk", hint: "Message the help desk team",
                   onSelect: onOpenHelpdesk }] },
+    // Which ERP company answers come from, for users who can read more than one.
+    erpCompanies.length > 1 ? { label: "ERP company", icon: <FolderIcon width={18} height={18} />,
+      hint: erpCompany, submenu: erpCompanies.map((c) => ({
+        label: c, checked: c === erpCompany, onSelect: () => onErpCompany(c) })) } : null,
     { divider: true },
     { label: "Web search", icon: <GlobeIcon width={18} height={18} />, checked: webSearch,
       keepOpen: true, onSelect: onToggleWebSearch },
@@ -219,6 +224,13 @@ export default function Composer({ text, setText, files, onAddFiles, onRemoveFil
                 className={`menu-left wide ${placement}`} onClose={() => setMenu(null)} />
             )}
           </div>
+          {erpCompanies.length > 1 && (
+            <button type="button" className="tool-chip company-chip"
+              onClick={() => openMenu("plus", plusRef)}
+              title="ERP answers come from this company: click to change" aria-label={`ERP company: ${erpCompany}`}>
+              <FolderIcon width={15} height={15} /> {erpCompany}
+            </button>
+          )}
           {webSearch && (
             <button type="button" className="tool-chip" onClick={onToggleWebSearch}
               title="Web search is on: click to turn it off" aria-label="Turn off web search">
