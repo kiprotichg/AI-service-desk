@@ -6,6 +6,7 @@ import Message from "./Message.jsx";
 import Welcome from "./Welcome.jsx";
 import VoiceMode from "./VoiceMode.jsx";
 import { TemporaryIcon } from "./Icons.jsx";
+import { readAloud } from "../lib/speech.js";
 
 // What the empty screen shows in each answer mode.
 const EMPTY = {
@@ -44,7 +45,7 @@ let draftKey = 0;
 export default function ChatView({ chat, aiMode, chatMode, customerName, greetName,
   onModeLoaded, onChatChanged, onChatMissing, temporary = false, webSearch = false,
   onToggleWebSearch, onChangeMode, projects, projectId, onPatchChat, onNewProject,
-  micLang = "en-KE", onMicLang, onOpenHelpdesk }) {
+  micLang = "en-KE", onMicLang, onOpenHelpdesk, autoRead = false }) {
   const [conv, setConv] = useState(chat ? { ...chat, status: "open" } : null);
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(Boolean(chat));
@@ -179,6 +180,8 @@ export default function ChatView({ chat, aiMode, chatMode, customerName, greetNa
         res.user_message, res.reply]);
       setConv((c) => ({ ...c, ...res.conversation }));
       if (res.ticket) setTicket(res.ticket);
+      // Voice mode reads its answers itself; otherwise read it if the setting is on.
+      if (autoRead && !voice) readAloud.start(res.reply.id, res.reply.content);
       return res.reply.content;
     } catch (err) {
       if (!mounted.current) return null;
@@ -212,6 +215,7 @@ export default function ChatView({ chat, aiMode, chatMode, customerName, greetNa
       setMessages((m) => merge(m, res));
       setConv((c) => ({ ...c, ...res.conversation }));
       if (res.ticket) setTicket(res.ticket);
+      if (autoRead) readAloud.start(res.reply.id, res.reply.content);   // regenerated / edited
     } catch (err) {
       if (!mounted.current) return;
       setMessages(before);

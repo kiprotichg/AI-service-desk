@@ -95,20 +95,27 @@ export function speechChunks(text) {
   return out.map((s) => s.trim()).filter(Boolean);
 }
 
-/** Read text aloud; resolves when finished (or cancelled). */
-export function speak(text, lang) {
+/**
+ * Read text aloud; resolves when finished (or cancelled). Sound goes to the
+ * computer's current output device, e.g. external speakers chosen in Windows.
+ * opts: { voiceName: a voice from listVoices() ("" = best match for lang), rate: 0.5-2 }
+ */
+export function speak(text, lang, opts = {}) {
   return new Promise((resolve) => {
     if (!ttsSupported) { resolve(); return; }
     const synth = window.speechSynthesis;
     synth.cancel();
-    const voice = synth.getVoices().find((v) => v.lang === lang)
-      || synth.getVoices().find((v) => v.lang?.startsWith(lang.split("-")[0]));
+    const voices = synth.getVoices();
+    const voice = (opts.voiceName && voices.find((v) => v.name === opts.voiceName))
+      || voices.find((v) => v.lang === lang)
+      || voices.find((v) => v.lang?.startsWith(lang.split("-")[0]));
     const chunks = speechChunks(text);
     if (!chunks.length) { resolve(); return; }
     chunks.forEach((chunk, i) => {
       const u = new SpeechSynthesisUtterance(chunk);
-      u.lang = lang;
+      u.lang = voice?.lang || lang;
       if (voice) u.voice = voice;
+      if (opts.rate) u.rate = opts.rate;
       if (i === chunks.length - 1) { u.onend = () => resolve(); u.onerror = () => resolve(); }
       synth.speak(u);
     });
@@ -116,3 +123,50 @@ export function speak(text, lang) {
 }
 
 export const stopSpeaking = () => { if (ttsSupported) window.speechSynthesis.cancel(); };
+
+/** The voices this browser offers (they load a moment after the page). */
+export function useVoices() {
+  const [voices, setVoices] = useState(() => (ttsSupported ? window.speechSynthesis.getVoices() : []));
+  useEffect(() => {
+    if (!ttsSupported) return undefined;
+    const update = () => setVoices(window.speechSynthesis.getVoices());
+    update();
+    window.speechSynthesis.addEventListener("voiceschanged", update);
+    return () => window.speechSynthesis.removeEventListener("voiceschanged", update);
+  }, []);
+  return voices;
+}
+
+// ---- reading answers aloud (one at a time, app-wide) ------------------------
+let readOptions = { lang: "en-KE", voiceName: "", rate: 1 };
+let speakingId = null;
+const listeners = new Set();
+const announce = () => listeners.forEach((fn) => fn(speakingId));
+
+export const readAloud = {
+  /** Voice settings from the Settings dialog. */
+  configure(opts) { readOptions = { ...readOptions, ...opts }; },
+  /** Read one answer; reading another (or the same again) stops the current one. */
+  async start(id, text) {
+    if (!ttsSupported || !text) return;
+    speakingId = id;
+    announce();
+    await speak(text, readOptions.lang, readOptions);
+    if (speakingId === id) { speakingId = null; announce(); }
+  },
+  stop() {
+    stopSpeaking();
+    speakingId = null;
+    announce();
+  },
+};
+
+/** The id of the answer being read aloud right now, or null. */
+export function useSpeakingId() {
+  const [id, setId] = useState(speakingId);
+  useEffect(() => {
+    listeners.add(setId);
+    return () => listeners.delete(setId);
+  }, []);
+  return id;
+}

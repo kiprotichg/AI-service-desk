@@ -831,3 +831,10 @@ td select { padding: 4px 8px; }
 .erp-note { margin: 8px 0 0; font-size: .78rem; color: var(--accent); display: flex; align-items: center; gap: 6px; }
 .erp-note::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); flex-shrink: 0; }
 .auth-hint { margin: -4px 0 0; font-size: .8rem; color: var(--muted); }
+/* Read answers aloud */
+.icon-btn.reading { color: var(--accent); background: var(--accent-soft); }
+.check-row { display: flex; align-items: center; gap: 8px; font-size: .9rem; cursor: pointer; }
+.check-row input { width: 16px; height: 16px; accent-color: var(--brand); }
+.read-row { display: flex; flex-direction: column; gap: 4px; font-size: .85rem; }
+.read-row select { padding: 8px 10px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg); max-width: 100%; }
+.test-voice { align-self: flex-start; }

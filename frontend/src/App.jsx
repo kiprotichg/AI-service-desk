@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, session, userSession } from "./api/client.js";
+import { readAloud } from "./lib/speech.js";
 import {
   applyTheme, effectiveTheme, onSystemThemeChange, recentChats, settingsStore, sidebarPref,
   sortChats,
@@ -142,6 +143,8 @@ export default function App() {
   useEffect(() => {
     settingsStore.save(settings);
     applyTheme(settings.theme);
+    readAloud.configure({ lang: settings.micLang, voiceName: settings.voiceName,
+                          rate: settings.readRate });
   }, [settings]);
 
   const theme = effectiveTheme(settings.theme);
@@ -467,6 +470,7 @@ export default function App() {
             onChangeMode={setChatMode} projects={projects} projectId={active?.project_id ?? null}
             onPatchChat={patchChat} onNewProject={newProject}
             micLang={settings.micLang} onMicLang={(micLang) => setSettings((s) => ({ ...s, micLang }))}
+            autoRead={settings.autoRead}
             onOpenHelpdesk={openHelpdesk} />
         )}
         {view !== "chat" && (

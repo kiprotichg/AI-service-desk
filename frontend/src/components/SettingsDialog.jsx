@@ -1,12 +1,67 @@
 import { useEffect, useRef } from "react";
 import { CloseIcon, MoonIcon, SunIcon } from "./Icons.jsx";
 import { MODE_INFO } from "./ModeSwitch.jsx";
+import { speak, ttsSupported, useVoices } from "../lib/speech.js";
 
 const THEMES = [
   { key: "system", label: "System" },
   { key: "light", label: "Light", Icon: SunIcon },
   { key: "dark", label: "Dark", Icon: MoonIcon },
 ];
+
+const RATES = [{ value: 0.75, label: "Slow" }, { value: 1, label: "Normal" },
+               { value: 1.25, label: "Fast" }, { value: 1.5, label: "Faster" }];
+
+/** Read answers aloud: on/off, voice and speed. */
+function ReadAloudSettings({ settings, set }) {
+  const voices = useVoices();
+  if (!ttsSupported) {
+    return (
+      <section className="setting">
+        <span className="setting-label">Read answers aloud</span>
+        <p className="setting-hint">This browser can't read text aloud. Use Chrome or Edge.</p>
+      </section>
+    );
+  }
+  // English and Kiswahili voices first, then the rest.
+  const useful = (v) => /^(en|sw)/i.test(v.lang);
+  const sorted = [...voices.filter(useful), ...voices.filter((v) => !useful(v))];
+  return (
+    <section className="setting">
+      <span className="setting-label" id="read-label">Read answers aloud</span>
+      <p className="setting-hint">Sound plays through your computer's speaker. To use an external
+        speaker, connect it and choose it as the output in Windows (the speaker icon on the
+        taskbar). Every answer also has a speaker button to read it on demand.</p>
+      <label className="check-row">
+        <input type="checkbox" checked={settings.autoRead}
+          onChange={(e) => set({ autoRead: e.target.checked })} />
+        Read every new answer aloud automatically
+      </label>
+      <div className="read-row">
+        <label htmlFor="settings-voice">Voice</label>
+        <select id="settings-voice" value={settings.voiceName}
+          onChange={(e) => set({ voiceName: e.target.value })}>
+          <option value="">Automatic (matches your voice-typing language)</option>
+          {sorted.map((v) => (
+            <option key={v.voiceURI || v.name} value={v.name}>{v.name} ({v.lang})</option>
+          ))}
+        </select>
+      </div>
+      <div className="segmented" role="radiogroup" aria-label="Reading speed">
+        {RATES.map(({ value, label }) => (
+          <button key={value} type="button" role="radio" aria-checked={settings.readRate === value}
+            className={settings.readRate === value ? "active" : ""}
+            onClick={() => set({ readRate: value })}>{label}</button>
+        ))}
+      </div>
+      <button type="button" className="ghost test-voice"
+        onClick={() => speak("Hello! This is how AI in Ideal will read your answers.",
+          settings.micLang || "en-KE", { voiceName: settings.voiceName, rate: settings.readRate })}>
+        Test voice
+      </button>
+    </section>
+  );
+}
 
 /** Settings are saved as soon as they change; "Done" just closes the dialog. */
 export default function SettingsDialog({ settings, onChange, onClose, chatCount, onDeleteAll,
@@ -88,6 +143,8 @@ export default function SettingsDialog({ settings, onChange, onClose, chatCount,
             ))}
           </div>
         </section>
+
+        <ReadAloudSettings settings={settings} set={set} />
 
         <section className="setting">
           <span className="setting-label">Chat history</span>

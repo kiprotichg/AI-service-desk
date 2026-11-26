@@ -1,6 +1,21 @@
 import { useEffect, useRef, useState } from "react";
 import Attachment from "./Attachment.jsx";
-import { CheckIcon, CopyIcon, EditIcon, RegenerateIcon, SparkIcon } from "./Icons.jsx";
+import { CheckIcon, CopyIcon, EditIcon, RegenerateIcon, SparkIcon, StopIcon, VolumeIcon } from "./Icons.jsx";
+import { readAloud, ttsSupported, useSpeakingId } from "../lib/speech.js";
+
+/** Speaker button: read this answer aloud through the computer's speakers; click again to stop. */
+function ReadAloudButton({ id, text }) {
+  const speaking = useSpeakingId() === id;
+  if (!ttsSupported) return null;
+  return (
+    <button className={`icon-btn small ${speaking ? "reading" : ""}`}
+      onClick={() => (speaking ? readAloud.stop() : readAloud.start(id, text))} disabled={!text}
+      title={speaking ? "Stop reading" : "Read aloud"} aria-label={speaking ? "Stop reading" : "Read aloud"}
+      aria-pressed={speaking}>
+      {speaking ? <StopIcon width={16} height={16} /> : <VolumeIcon width={16} height={16} />}
+    </button>
+  );
+}
 
 /** Copy text; falls back to a hidden textarea when the Clipboard API is refused. */
 async function copyText(text) {
@@ -158,6 +173,7 @@ export default function Message({ message, token, busy, isLast, hasLater, onRege
         {message.erp_note && <p className="erp-note">{message.erp_note}</p>}
         <div className="msg-actions">
           <CopyButton text={content} label="Copy reply" />
+          <ReadAloudButton id={id} text={content} />
           {isLast && saved && (
             <button className="icon-btn small" onClick={() => onRegenerate(id)} disabled={busy}
               title="Regenerate response" aria-label="Regenerate response">

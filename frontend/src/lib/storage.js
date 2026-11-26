@@ -45,7 +45,9 @@ export const sidebarPref = {
 // ---- settings (Settings dialog) -----------------------------------------
 const SETTINGS_KEY = "settings";
 export const DEFAULT_SETTINGS = { name: "", theme: "system", defaultMode: "service",
-                                  webSearch: false, micLang: "en-KE" };
+                                  webSearch: false, micLang: "en-KE",
+                                  autoRead: false, voiceName: "", readRate: 1 };
+const READ_RATES = [0.75, 1, 1.25, 1.5];
 const MIC_LANGS = ["en-KE", "en-US", "en-GB", "sw-KE"];
 const THEMES = ["system", "light", "dark"];
 const MODES = ["service", "sales", "general"];
@@ -58,6 +60,9 @@ export const settingsStore = {
     s.name = typeof s.name === "string" ? s.name.slice(0, 120) : "";
     s.webSearch = s.webSearch === true;
     if (!MIC_LANGS.includes(s.micLang)) s.micLang = "en-KE";
+    s.autoRead = s.autoRead === true;
+    s.voiceName = typeof s.voiceName === "string" ? s.voiceName.slice(0, 200) : "";
+    if (!READ_RATES.includes(s.readRate)) s.readRate = 1;
     return s;
   },
   save: (s) => write(SETTINGS_KEY, s),
