@@ -17,7 +17,6 @@ NAV keeps each company's data in its own tables named "<Company>$<Table>", with
 . " \\ / ' % [ ] in either name replaced by "_" (for example
 "CRONUS International Ltd_$Cust_ Ledger Entry").
 """
-import contextvars
 import re
 import socket
 import threading
@@ -231,34 +230,9 @@ def sql_name(name):
     return _NAV_SPECIAL.sub("_", name)
 
 
-# The company this request reads: chosen per message (ERP_COMPANIES), else ERP_COMPANY.
-ACTIVE_COMPANY = contextvars.ContextVar("erp_company", default="")
-
-
-def current_company():
-    return ACTIVE_COMPANY.get() or current_app.config.get("ERP_COMPANY", "")
-
-
-def companies(app=None):
-    """The companies users may pick: ERP_COMPANY first, then ERP_COMPANIES."""
-    cfg = (app or current_app).config
-    names = [cfg.get("ERP_COMPANY", "")] + (cfg.get("ERP_COMPANIES", "") or "").split(",")
-    out = []
-    for name in (n.strip() for n in names):
-        if name and name not in out:
-            out.append(name)
-    return out
-
-
-def pick_company(name):
-    """The requested company if it's one users may pick, else the default."""
-    name = (name or "").strip()
-    return name if name in companies() else current_app.config.get("ERP_COMPANY", "")
-
-
 def company_table(table, company=None):
-    """[Company$Table] for this request's company (or the one given)."""
-    company = company or current_company()
+    """[Company$Table] for the configured company (or the one given)."""
+    company = company or current_app.config.get("ERP_COMPANY")
     if not company:
         raise ERPNotConfigured("Set ERP_COMPANY in backend/.env (for example IDEALDYNAMICS_PROP)")
     return f"[{sql_name(company)}${sql_name(table)}]"
@@ -279,7 +253,7 @@ def connection_report():
 
 def company_tables(company=None, with_rows_only=True):
     """Tables of one company with their row counts, from SQL Server's own statistics."""
-    company = company or current_company()
+    company = company or current_app.config.get("ERP_COMPANY")
     prefix = sql_name(company) + "$"
     rows = query(
         "SELECT t.name AS table_name, SUM(p.rows) AS row_count "
@@ -303,7 +277,7 @@ def company_tables(company=None, with_rows_only=True):
 
 
 def table_columns(table, company=None):
-    company = company or current_company()
+    company = company or current_app.config.get("ERP_COMPANY")
     full = f"{sql_name(company)}${sql_name(table)}"
     return query(
         "SELECT c.name AS column_name, ty.name AS type, c.max_length "

@@ -45,8 +45,7 @@ let draftKey = 0;
 export default function ChatView({ chat, aiMode, chatMode, customerName, greetName,
   onModeLoaded, onChatChanged, onChatMissing, temporary = false, webSearch = false,
   onToggleWebSearch, onChangeMode, projects, projectId, onPatchChat, onNewProject,
-  micLang = "en-KE", onMicLang, onOpenHelpdesk, autoRead = false,
-  erpCompanies = [], erpCompany = "", onErpCompany }) {
+  micLang = "en-KE", onMicLang, onOpenHelpdesk, autoRead = false }) {
   const [conv, setConv] = useState(chat ? { ...chat, status: "open" } : null);
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(Boolean(chat));
@@ -174,7 +173,7 @@ export default function ChatView({ chat, aiMode, chatMode, customerName, greetNa
           } else if (ev.type === "reset" && mounted.current) {
             editAnswer(() => "");   // a half-written answer is being replaced
           }
-        }, erpCompany);
+        });
       onChatChanged(res.conversation, current.token);
       if (!mounted.current) return null;
       setMessages((m) => [...m.filter((x) => x.id !== tempId && x.id !== answerId && x.id !== res.user_message.id),
@@ -230,7 +229,7 @@ export default function ChatView({ chat, aiMode, chatMode, customerName, greetNa
   function regenerate(replyId) {
     rework(
       (m) => m.filter((x) => x.id !== replyId),
-      () => api.regenerate(conv.id, conv.token, replyId, chatMode, webSearch, erpCompany),
+      () => api.regenerate(conv.id, conv.token, replyId, chatMode, webSearch),
       (m, res) => [...m, res.reply],
     );
   }
@@ -242,7 +241,7 @@ export default function ChatView({ chat, aiMode, chatMode, customerName, greetNa
         const i = m.findIndex((x) => x.id === messageId);
         return [...m.slice(0, i), { ...m[i], content: newText }];
       },
-      () => api.editMessage(conv.id, conv.token, messageId, newText, chatMode, webSearch, erpCompany),
+      () => api.editMessage(conv.id, conv.token, messageId, newText, chatMode, webSearch),
       (m, res) => [...m.map((x) => (x.id === messageId ? res.user_message : x)), res.reply],
     );
   }
@@ -276,8 +275,7 @@ export default function ChatView({ chat, aiMode, chatMode, customerName, greetNa
       projects={projects} projectId={conv?.id ? projectId : pendingProject}
       onPickProject={pickProject} onNewProject={newProjectHere}
       onOpenHelpdesk={onOpenHelpdesk} onVoice={() => setVoice(true)}
-      micLang={micLang} onMicLang={onMicLang} temporary={temporary}
-      erpCompanies={erpCompanies} erpCompany={erpCompany} onErpCompany={onErpCompany} />
+      micLang={micLang} onMicLang={onMicLang} temporary={temporary} />
   );
   const voiceOverlay = voice && (
     <VoiceMode lang={micLang} onAsk={(said) => send(said)} onClose={() => setVoice(false)} />

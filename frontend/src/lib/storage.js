@@ -46,7 +46,7 @@ export const sidebarPref = {
 const SETTINGS_KEY = "settings";
 export const DEFAULT_SETTINGS = { name: "", theme: "system", defaultMode: "service",
                                   webSearch: false, micLang: "en-KE",
-                                  autoRead: false, voiceName: "", readRate: 1, erpCompany: "" };
+                                  autoRead: false, voiceName: "", readRate: 1 };
 const READ_RATES = [0.75, 1, 1.25, 1.5];
 const MIC_LANGS = ["en-KE", "en-US", "en-GB", "sw-KE"];
 const THEMES = ["system", "light", "dark"];
@@ -63,7 +63,6 @@ export const settingsStore = {
     s.autoRead = s.autoRead === true;
     s.voiceName = typeof s.voiceName === "string" ? s.voiceName.slice(0, 200) : "";
     if (!READ_RATES.includes(s.readRate)) s.readRate = 1;
-    s.erpCompany = typeof s.erpCompany === "string" ? s.erpCompany.slice(0, 60) : "";
     return s;
   },
   save: (s) => write(SETTINGS_KEY, s),

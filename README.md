@@ -528,28 +528,6 @@ ERP_ALLOWED_EMAILS=someone@gmail.com           # optional: extra approved addres
 strangers out. Other users get the normal assistant without lookups, and the server
 refuses to run a lookup for them even if the model asks for one.
 
-**Several companies:** `ERP_COMPANY` is the default, and `ERP_COMPANIES` lists more
-companies users may switch to, for example `ERP_COMPANIES=IDEALDYNAMICS`. Users with ERP
-access pick one from **+ menu → ERP company**, and a chip by the + button shows which one
-answers. Each message carries its company, and answers name it ("Includes live data from
-the ERP (IDEALDYNAMICS)").
-
-**Profitability** (`contract_profitability`, **admins only**: it reads payroll):
-- **Revenue:** the contract's posted invoices.
-- **Staff:** everyone on its time sheets, linked to payroll through the Employee card's
-  Resource No. (or the same number).
-- **Cost, month by month:** each person's gross earnings (codes starting with E) plus
-  employer contributions, shared by their time on the contract that month.
-- **Notes:** it reports staff months without payroll. Costs other than payroll aren't
-  included.
-- **Admins:** set them with `ADMIN_EMAILS`.
-
-**When the ERP changes:**
-- Tables are read live, and the table list refreshes every 10 minutes.
-- If an upgrade renames or removes a column or table a lookup uses, the lookup reports
-  which one, and the assistant reads the current layout (`describe_table`) and asks its own
-  read-only query (`run_query`) instead of failing.
-
 **What it can look up** (`app/services/erp_tools.py`):
 
 | Lookup | Answers |

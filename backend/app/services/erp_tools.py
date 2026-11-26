@@ -608,8 +608,8 @@ def data_quality():
     out_contracts["active_never_invoiced"] = never[0]["n"] if never else 0
     return {"service_items": first(items), "customers": first(customers), "contracts": out_contracts,
             "active_contracts_never_invoiced": _rows(never_list),
-            "staff_costs_per_contract": "Only for time-sheet lines that name a contract, with payroll "
-                                        "for those staff (see contract_profitability, admins only)."}
+            "not_recorded_in_the_erp": "Staff costs and deployment per contract: the time sheets "
+                                       "don't record the contract, so no contract has them."}
 
 
 _DATE_ARG = re.compile(r"^\s*(\d{4})-(\d{1,2})(?:-(\d{1,2}))?\s*$")
@@ -701,115 +701,6 @@ def contract_billing(contract_no="", customer_no="", date_from="", date_to=""):
     return out
 
 
-def contract_profitability(contract_no, date_from="", date_to=""):
-    """Revenue, salary cost of the staff deployed, and profit for ONE contract over a
-    period. Admins only: it reads payroll.
-
-    - Revenue: the contract's posted invoices (Service Ledger Entry, Entry Type 1), as
-      contract_billing counts them.
-    - Staff: everyone on the contract's time sheets (Time Sheet Detail) in the period.
-    - Cost, month by month: for each month a person was on this contract, their gross
-      earnings (payroll codes starting with E) plus employer contributions for that month
-      (Payroll Transaction Ledger), times the share of that month's time-sheet quantity
-      that was on this contract. A guard who also worked elsewhere, or only some months
-      here, isn't charged in full.
-    """
-    if not FULL_ACCESS.get():
-        return {"error": PRIVATE_MESSAGE}
-    contract = (contract_no or "").strip().upper()
-    if not contract:
-        return {"error": "Give a contract number, e.g. SC00123."}
-    end = _date_arg(date_to, end=True) or dt.date.today()
-    start = _date_arg(date_from)
-    if start is None:   # default: this month and the two before it
-        y, m = end.year, end.month - 2
-        while m < 1:
-            y, m = y - 1, m + 12
-        start = dt.date(y, m, 1)
-    p = {"c": contract, "df": start, "dt": end, "pf": start.replace(day=1)}
-
-    revenue_row = erp.query(
-        f"SELECT -SUM(s.[Amount (LCY)]) AS revenue, COUNT(DISTINCT s.[Document No_]) AS invoices "
-        f"FROM {_t('Service Ledger Entry')} s WHERE s.[Entry Type] = 1 AND s.[Service Contract No_] = :c "
-        f"AND s.[Posting Date] >= :df AND s.[Posting Date] <= :dt", p)[0]
-    revenue = float(revenue_row["revenue"] or 0)
-    ts = _t('Time Sheet Detail')
-    deployed = erp.query(
-        f"SELECT TOP 100 d.[Resource No_] AS staff_no, SUM(d.[Quantity]) AS on_contract "
-        f"FROM {ts} d WHERE d.[Contract No_] = :c AND d.[Resource No_] <> '' "
-        f"AND d.[Date] >= :df AND d.[Date] <= :dt GROUP BY d.[Resource No_] ORDER BY on_contract DESC", p)
-
-    staff, cost, missing = [], 0.0, []
-    if deployed:
-        binds = {f"r{i}": row["staff_no"] for i, row in enumerate(deployed)}
-        in_list = ", ".join(f":r{i}" for i in range(len(deployed)))
-        month = "YEAR(d.[Date]) AS y, MONTH(d.[Date]) AS m"
-        # Time per person per month: on this contract, and on everything.
-        on_c = erp.query(
-            f"SELECT d.[Resource No_] AS staff_no, {month}, SUM(d.[Quantity]) AS q FROM {ts} d "
-            f"WHERE d.[Contract No_] = :c AND d.[Resource No_] IN ({in_list}) AND d.[Date] >= :df "
-            f"AND d.[Date] <= :dt GROUP BY d.[Resource No_], YEAR(d.[Date]), MONTH(d.[Date])", {**p, **binds})
-        on_all = {(r["staff_no"], r["y"], r["m"]): float(r["q"] or 0) for r in erp.query(
-            f"SELECT d.[Resource No_] AS staff_no, {month}, SUM(d.[Quantity]) AS q FROM {ts} d "
-            f"WHERE d.[Resource No_] IN ({in_list}) AND d.[Date] >= :df AND d.[Date] <= :dt "
-            f"GROUP BY d.[Resource No_], YEAR(d.[Date]), MONTH(d.[Date])", {**p, **binds})}
-        # Time sheets name resources; payroll names employees. The Employee card's
-        # Resource No. links them; otherwise the two numbers are the same.
-        employee_of = {no: no for no in binds.values()}
-        employee_of.update({r["res"]: r["emp"] for r in erp.query(
-            f"SELECT e.[No_] AS emp, e.[Resource No_] AS res FROM {_t('Employee')} e "
-            f"WHERE e.[Resource No_] IN ({in_list})", binds)})
-        emp_binds = {f"e{i}": emp for i, emp in enumerate(sorted(set(employee_of.values())))}
-        emp_list = ", ".join(f":{k}" for k in emp_binds)
-        pay = {(r["emp"], r["y"], r["m"]): float(r["gross"] or 0) + float(r["employer"] or 0) for r in erp.query(
-            f"SELECT p.[Employee No] AS emp, YEAR(p.[Period]) AS y, MONTH(p.[Period]) AS m, "
-            f"SUM(CASE WHEN p.[Code] LIKE 'E%' THEN p.[Amount] ELSE 0 END) AS gross, "
-            f"SUM(p.[Employer Amount]) AS employer FROM {_t('Payroll Transaction Ledger')} p "
-            f"WHERE p.[Employee No] IN ({emp_list}) AND p.[Period] >= :pf AND p.[Period] <= :dt "
-            f"GROUP BY p.[Employee No], YEAR(p.[Period]), MONTH(p.[Period])", {**p, **emp_binds})}
-
-        per_staff = {}
-        for r in on_c:
-            no, y, m, q = r["staff_no"], r["y"], r["m"], float(r["q"] or 0)
-            emp = employee_of.get(no, no)
-            share = q / (on_all.get((no, y, m)) or q) if q else 0.0
-            e = per_staff.setdefault(no, {"staff_no": no, "employee_no": emp, "time_on_contract": 0.0,
-                                          "months": 0, "cost_charged": 0.0, "months_without_payroll": []})
-            e["time_on_contract"] += q
-            e["months"] += 1
-            if (emp, y, m) in pay:   # this month's pay, shared by this month's time here
-                e["cost_charged"] += pay[(emp, y, m)] * share
-            else:
-                e["months_without_payroll"].append(f"{y:04d}-{m:02d}")
-        for row in deployed:
-            e = per_staff.get(row["staff_no"])
-            if not e:
-                continue
-            e["cost_charged"] = round(e["cost_charged"], 2)
-            cost += e["cost_charged"]
-            if e["months_without_payroll"]:
-                missing.append(row["staff_no"])
-            staff.append(e)
-
-    profit = round(revenue - cost, 2)
-    notes = ["Cost covers payroll only for the staff on this contract's time sheets; other costs "
-             "(equipment, transport, supervision) aren't included."]
-    if missing:
-        notes.append(f"{len(missing)} of {len(deployed)} staff have months on this contract with no payroll "
-                     f"({', '.join(missing[:10])}); those months' cost is missing, so the profit is overstated.")
-    if not deployed:
-        notes.append("Nobody is on this contract's time sheets in this period, so there's no staff cost.")
-    if not revenue_row["invoices"]:
-        notes.append("No posted invoices for this contract in this period.")
-    return {"contract_no": contract, "company": erp.current_company(),
-            "period": f"{start.isoformat()} to {end.isoformat()}",
-            "revenue": round(revenue, 2), "invoices": revenue_row["invoices"],
-            "staff_deployed": len(deployed), "staff_fully_costed": len(deployed) - len(missing),
-            "staff_cost": round(cost, 2), "profit": profit,
-            "margin_percent": round(profit / revenue * 100, 1) if revenue else None,
-            "staff": staff[:50], "notes": notes}
-
-
 def staff_roster(date_from="", date_to="", group=""):
     """Staff rostered on service time sheets (Time Sheet Detail) for a date range: how many
     people, shifts and hours, per resource group and per day. Counts only, no names."""
@@ -866,7 +757,7 @@ _tables_cache = {"at": 0.0, "company": None, "tables": []}
 
 def _all_tables():
     """Every table of the company with its row count (cached for 10 minutes)."""
-    company = erp.current_company()
+    company = current_app.config.get("ERP_COMPANY")
     now = time.monotonic()
     if _tables_cache["company"] != company or now - _tables_cache["at"] > 600:
         _tables_cache.update(at=now, company=company, tables=erp.company_tables(with_rows_only=False))
@@ -1073,14 +964,6 @@ LOOKUPS = {
                           "date_from": dict(_STR, description="Optional first day, YYYY-MM-DD (or YYYY-MM)"),
                           "date_to": dict(_STR, description="Optional last day, YYYY-MM-DD (or YYYY-MM)")},
                          []),
-    "contract_profitability": (contract_profitability, "ADMINS ONLY (reads payroll). Profitability of "
-                               "ONE contract over a period: revenue invoiced, the staff deployed on it "
-                               "(time sheets), their salary cost shared by time on the contract, profit "
-                               "and margin. Default period: this month and the two before.",
-                               {"contract_no": dict(_STR, description="Contract number, e.g. SC00107"),
-                                "date_from": dict(_STR, description="Optional first day, YYYY-MM-DD (or YYYY-MM)"),
-                                "date_to": dict(_STR, description="Optional last day, YYYY-MM-DD (or YYYY-MM)")},
-                               ["contract_no"]),
     "staff_roster": (staff_roster, "How many staff (guards) are rostered on the service time sheets "
                      "for a date range, with shifts and planned hours, per resource group and per day. "
                      "Defaults to the 7 days from today. Counts only; it can't tell the site, customer "
@@ -1216,33 +1099,12 @@ def run_lookup(name, args):
         return {"error": "The ERP server isn't answering right now (network or firewall). "
                          "Ask the user to try again in a minute."}
     except Exception as exc:   # network, timeout, permissions: tell the model, don't crash
-        changed = _schema_change(exc)
-        if changed:
-            # The ERP was changed (an upgrade or customisation renamed or removed a table
-            # or column). Don't pretend it's down: let the model read the current layout
-            # and ask its own read-only query instead.
-            log.warning("ERP lookup %s no longer matches the database: %s", name, changed)
-            return {"error": f"This lookup no longer matches the ERP tables ({changed}); the "
-                             "database layout has changed. Get the answer another way: use "
-                             "list_tables / describe_table to see the current tables and columns, "
-                             "then run_query with the right names."}
         log.exception("ERP lookup %s failed", name)
         return {"error": f"The ERP database couldn't be reached right now ({type(exc).__name__})."}
 
 
-_SCHEMA_ERROR = re.compile(r"Invalid (column|object) name '([^']+)'", re.I)
-
-
-def _schema_change(exc):
-    """'column X' / 'table X' when SQL Server says a name no longer exists, else ''."""
-    m = _SCHEMA_ERROR.search(str(exc))
-    if not m:
-        return ""
-    return f"{'column' if m.group(1).lower() == 'column' else 'table'} {m.group(2)} not found"
-
-
 def instructions(app=None, mode="service", full_access=False):
-    company = erp.current_company()
+    company = (app or current_app).config.get("ERP_COMPANY", "")
     allowed = lookups_for(mode)
     examples = "\n".join(f"- {q} -> {' + '.join(names)}" for q, names in EXAMPLE_QUESTIONS
                          if set(names) <= allowed)
@@ -1325,10 +1187,8 @@ end and invoice dates come only from contract_details or find_contracts.
 Private data: payroll, HR, bank and system tables, and private columns (ID and social
 security numbers, bank accounts, salaries, birth dates), can only be read by admins. If a
 tool says something is private, tell the user only admins can see it. Contract
-profitability: use contract_profitability (admins only); it shares each person's monthly pay
-by their time on the contract's time sheets. Give its figures and repeat its notes (costs not
-included, months without payroll) plainly. If the user isn't an admin, say profitability
-needs payroll, which only admins can see, and show what was invoiced instead.
+profitability per contract can't be worked out, because the time sheets don't record the
+contract, so staff costs can't be linked to contracts; say so, and show what was invoiced.
 Say briefly that the figures come from the ERP. If a lookup finds nothing or fails, say so
 plainly. Customer numbers look like the "number" values the lookups return. Amounts are in
 the company's own currency: write them as plain numbers with thousands separators, never

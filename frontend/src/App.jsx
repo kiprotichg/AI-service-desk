@@ -374,10 +374,6 @@ export default function App() {
   const showAgentTools = Boolean(agent || user?.is_admin || (config && !config.require_login));
   const helpdesk = config?.helpdesk ?? null;
   const displayName = user?.name || settings.name || agent?.username;
-  // ERP companies this user may read (from /api/users/me); the first is the default.
-  const erpCompanies = user?.erp_companies || [];
-  const erpCompany = erpCompanies.includes(settings.erpCompany) ? settings.erpCompany
-    : (erpCompanies[0] || "");
 
   if (!config && !user) {
     return <div className="boot" aria-busy="true" />;   // a moment while settings load
@@ -475,8 +471,6 @@ export default function App() {
             onPatchChat={patchChat} onNewProject={newProject}
             micLang={settings.micLang} onMicLang={(micLang) => setSettings((s) => ({ ...s, micLang }))}
             autoRead={settings.autoRead}
-            erpCompanies={erpCompanies} erpCompany={erpCompany}
-            onErpCompany={(c) => setSettings((s) => ({ ...s, erpCompany: c }))}
             onOpenHelpdesk={openHelpdesk} />
         )}
         {view !== "chat" && (
